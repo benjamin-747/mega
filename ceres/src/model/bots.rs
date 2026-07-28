@@ -126,6 +126,17 @@ pub struct CreateBotTokenResponse {
     pub token_plain: String,
 }
 
+/// Response for mega-init bot bootstrap (`POST /bots/bootstrap-init`).
+///
+/// Requires header `X-Mega-Init-Secret` matching `MEGA_INIT_BOOTSTRAP_SECRET`.
+/// `token` is a `bot_` push token returned once; use as Bearer (or Basic password).
+#[derive(Serialize, ToSchema)]
+pub struct BootstrapInitBotResponse {
+    pub bot_id: i64,
+    pub bot_name: String,
+    pub token: String,
+}
+
 /// Item in the list bot tokens response.
 #[derive(Serialize, ToSchema)]
 pub struct ListBotTokenItem {

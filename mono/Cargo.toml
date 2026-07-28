@@ -32,7 +32,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 percent-encoding = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -56,6 +56,7 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 async-stream = { workspace = true }
@@ -85,4 +86,4 @@ tempfile = { workspace = true }
 jupiter-migrate = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-qlean = { workspace = true }
+qlean = { git = "https://github.com/benjamin-747/qlean.git", rev = "c3bf91e0f4020b580fd5bfe5d3d7d22bc3754651" }

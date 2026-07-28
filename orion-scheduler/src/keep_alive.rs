@@ -10,7 +10,7 @@ mod platform {
     use std::sync::Arc;
 
     use anyhow::Result;
-    use qlean::{ImageConfig, Machine, MachineConfig};
+    use qlean::{ImageConfig, InteractiveShell, Machine, MachineConfig};
     use tokio::sync::Mutex;
 
     use super::ImageSpec;
@@ -146,6 +146,30 @@ mod platform {
                 Ok(Some(ip))
             }
         }
+
+        /// Open a dedicated interactive PTY shell (does not block management SSH).
+        ///
+        /// Temporarily takes the `Machine` out of the mutex so log `exec` is not
+        /// blocked for the whole vsock SSH handshake (can take many seconds).
+        pub async fn open_interactive_shell(
+            &self,
+            cols: u32,
+            rows: u32,
+        ) -> Result<InteractiveShell> {
+            let machine = {
+                let mut guard = self.machine.lock().await;
+                guard
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("VM has been shut down"))?
+            };
+            tracing::info!("[keep-alive] Opening interactive shell {}x{}", cols, rows);
+            let result = machine.open_interactive_shell(cols, rows).await;
+            {
+                let mut guard = self.machine.lock().await;
+                *guard = Some(machine);
+            }
+            result
+        }
     }
 
     impl Clone for KeepAliveMachine {
@@ -162,6 +186,38 @@ mod platform {
     use anyhow::Result;
 
     use super::ImageSpec;
+
+    /// Stub for InteractiveShell on non-Linux (never successfully constructed).
+    pub struct InteractiveShell;
+
+    pub struct InteractiveShellReader;
+    pub struct InteractiveShellWriter;
+
+    impl InteractiveShell {
+        pub fn split(self) -> (InteractiveShellReader, InteractiveShellWriter) {
+            (InteractiveShellReader, InteractiveShellWriter)
+        }
+    }
+
+    impl InteractiveShellReader {
+        pub async fn read_chunk(&mut self) -> Result<Option<Vec<u8>>> {
+            anyhow::bail!("VM operations require Linux + KVM")
+        }
+    }
+
+    impl InteractiveShellWriter {
+        pub async fn write(&self, _data: &[u8]) -> Result<()> {
+            anyhow::bail!("VM operations require Linux + KVM")
+        }
+
+        pub async fn resize(&self, _cols: u32, _rows: u32) -> Result<()> {
+            anyhow::bail!("VM operations require Linux + KVM")
+        }
+
+        pub async fn close(self, _reader: InteractiveShellReader) -> Result<()> {
+            anyhow::bail!("VM operations require Linux + KVM")
+        }
+    }
 
     /// Stub implementation for non-Linux platforms (macOS/Windows).
     pub struct KeepAliveMachine;
@@ -194,6 +250,14 @@ mod platform {
         }
 
         pub async fn get_ip(&self) -> Result<Option<String>> {
+            anyhow::bail!("VM operations require Linux + KVM")
+        }
+
+        pub async fn open_interactive_shell(
+            &self,
+            _cols: u32,
+            _rows: u32,
+        ) -> Result<InteractiveShell> {
             anyhow::bail!("VM operations require Linux + KVM")
         }
     }
