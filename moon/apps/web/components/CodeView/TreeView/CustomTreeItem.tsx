@@ -71,7 +71,15 @@ export const CustomTreeItem = React.forwardRef(function CustomTreeItem(
     <TreeItemProvider {...getContextProviderProps()}>
       <TreeItemRoot {...getRootProps(other)}>
         <TreeItemContent {...getContentProps()} sx={{ paddingLeft: 1 }}>
-          <TreeItemIconContainer {...getIconContainerProps()}>
+          <TreeItemIconContainer
+            {...getIconContainerProps({
+              // Icon sits inside content; without this, expand/collapse clicks bubble to
+              // onItemClick and re-expand the folder via navigation handlers.
+              onClick: (event: React.MouseEvent) => {
+                event.stopPropagation()
+              }
+            })}
+          >
             {isNodeLoading ? <CircularProgress size={12} sx={{ color: 'black' }} /> : <TreeItemIcon status={status} />}
           </TreeItemIconContainer>
 

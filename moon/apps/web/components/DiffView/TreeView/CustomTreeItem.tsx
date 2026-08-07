@@ -66,7 +66,13 @@ export const CustomTreeItem = React.forwardRef(function CustomTreeItem(
     <TreeItemProvider {...getContextProviderProps()}>
       <TreeItemRoot {...getRootProps(other)}>
         <TreeItemContent {...getContentProps()} sx={{ paddingLeft: 1 }}>
-          <TreeItemIconContainer {...getIconContainerProps()}>
+          <TreeItemIconContainer
+            {...getIconContainerProps({
+              onClick: (event: React.MouseEvent) => {
+                event.stopPropagation()
+              }
+            })}
+          >
             <TreeItemIcon status={status} />
           </TreeItemIconContainer>
 
