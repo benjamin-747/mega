@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{collections::HashMap, ops::Deref};
 
 use callisto::{entity_ext::generate_id, mega_cl_reviewer};
 use common::errors::MegaError;
@@ -184,6 +184,31 @@ impl ClReviewerStorage {
                 MegaError::Other(format!("fail to list reviewers for {cl_link}"))
             })?;
         Ok(reviewers)
+    }
+
+    /// Distinct `github_login → campsite_user_id` pairs already stored on reviewers.
+    pub async fn github_login_to_campsite_ids(&self) -> Result<HashMap<String, String>, MegaError> {
+        let rows = mega_cl_reviewer::Entity::find()
+            .filter(mega_cl_reviewer::Column::GithubLogin.is_not_null())
+            .all(self.get_connection())
+            .await?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let Some(login) = row.github_login.as_deref().map(str::trim) else {
+                continue;
+            };
+            if login.is_empty() || row.campsite_user_id.trim().is_empty() {
+                continue;
+            }
+            // Prefer public-id shaped campsite_user_id when duplicates exist.
+            let id = row.campsite_user_id.trim();
+            if !map.contains_key(login)
+                || (id.len() == 12 && id.chars().all(|c| c.is_ascii_alphanumeric()))
+            {
+                map.insert(login.to_string(), id.to_string());
+            }
+        }
+        Ok(map)
     }
 
     pub async fn reviewer_change_state(

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use callisto::{entity_ext::generate_link, mega_cl, mega_refs, sea_orm_active_enums::ConvTypeEnum};
 use common::errors::MegaError;
@@ -8,6 +8,7 @@ use jupiter::{
     storage::{Storage, mono_storage::MonoStorage},
     utils::converter::FromMegaModel,
 };
+use serde::Deserialize;
 
 use crate::{
     application::{
@@ -118,14 +119,10 @@ pub(crate) trait Director<T: ApiHandler + Clone> {
             Ok(())
         } else {
             let reviewer_service = self.get_review_service(storage).await?;
+            let login_to_id = load_github_login_map(storage).await;
 
             if let Err(e) = reviewer_service
-                .assign_system_reviewers(
-                    &cl.link,
-                    &policy_contents,
-                    &changed_files,
-                    &std::collections::HashMap::new(),
-                )
+                .assign_system_reviewers(&cl.link, &policy_contents, &changed_files, &login_to_id)
                 .await
             {
                 tracing::warn!("Failed to assign Cedar reviewers: {}", e);
@@ -133,12 +130,7 @@ pub(crate) trait Director<T: ApiHandler + Clone> {
 
             // Resync reviewers when existing CL updates policy files
             if let Err(e) = reviewer_service
-                .sync_system_reviewers(
-                    &cl.link,
-                    &policy_contents,
-                    &changed_files,
-                    &std::collections::HashMap::new(),
-                )
+                .sync_system_reviewers(&cl.link, &policy_contents, &changed_files, &login_to_id)
                 .await
             {
                 tracing::warn!("Failed to resync Cedar reviewers: {}", e);
@@ -146,6 +138,91 @@ pub(crate) trait Director<T: ApiHandler + Clone> {
             Ok(())
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CampsiteMemberIdentity {
+    campsite_user_id: String,
+    #[serde(default)]
+    github_login: Option<String>,
+}
+
+/// Resolve Cedar github logins → campsite public ids from local tables and,
+/// when configured, Campsite `internal/member_identities`.
+async fn load_github_login_map(storage: &Storage) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    match storage.user_storage().github_login_to_campsite_ids().await {
+        Ok(from_tokens) => map.extend(from_tokens),
+        Err(e) => tracing::warn!(error = %e, "failed to load github_login map from access_token"),
+    }
+    match storage
+        .reviewer_storage()
+        .github_login_to_campsite_ids()
+        .await
+    {
+        Ok(from_reviewers) => map.extend(from_reviewers),
+        Err(e) => tracing::warn!(error = %e, "failed to load github_login map from reviewers"),
+    }
+
+    match fetch_campsite_github_login_map(storage).await {
+        Ok(from_campsite) => map.extend(from_campsite),
+        Err(e) => {
+            tracing::debug!(error = %e, "campsite member_identities unavailable for reviewer map")
+        }
+    }
+
+    map
+}
+
+async fn fetch_campsite_github_login_map(
+    storage: &Storage,
+) -> Result<HashMap<String, String>, MegaError> {
+    let config = storage.config();
+    let secret = config.oauth.mega_internal_secret.trim();
+    let api_base = config.oauth.campsite_api_domain.trim();
+    if secret.is_empty() || api_base.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let url = format!(
+        "{}/v1/organizations/mega/internal/member_identities",
+        api_base.trim_end_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|e| MegaError::Other(e.to_string()))?;
+    let resp = client
+        .get(&url)
+        .header("X-Mega-Internal-Secret", secret)
+        .send()
+        .await
+        .map_err(|e| MegaError::Other(format!("campsite member_identities request failed: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(MegaError::Other(format!(
+            "campsite member_identities HTTP {status}: {body}"
+        )));
+    }
+    let identities: Vec<CampsiteMemberIdentity> = resp
+        .json()
+        .await
+        .map_err(|e| MegaError::Other(format!("parse member_identities JSON: {e}")))?;
+
+    let mut map = HashMap::new();
+    for identity in identities {
+        let id = identity.campsite_user_id.trim();
+        let Some(login) = identity.github_login.as_deref().map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() || login.is_empty() {
+            continue;
+        }
+        map.insert(login.to_string(), id.to_string());
+    }
+    Ok(map)
 }
 
 fn cl_with_latest_to_hash(mut cl: mega_cl::Model, to_hash: &str) -> mega_cl::Model {
