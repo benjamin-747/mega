@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{collections::HashMap, ops::Deref};
 
 use callisto::{access_token, ssh_keys};
 use common::{errors::MegaError, utils::generate_id};
@@ -154,6 +154,26 @@ impl UserStorage {
             ))),
             None => Ok(None),
         }
+    }
+
+    /// Build `github_login → campsite_user_id` from access tokens that store both.
+    pub async fn github_login_to_campsite_ids(&self) -> Result<HashMap<String, String>, MegaError> {
+        let rows = access_token::Entity::find()
+            .filter(access_token::Column::GithubLogin.is_not_null())
+            .all(self.get_connection())
+            .await?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let Some(login) = row.github_login else {
+                continue;
+            };
+            let login = login.trim();
+            if login.is_empty() || row.campsite_user_id.trim().is_empty() {
+                continue;
+            }
+            map.insert(login.to_string(), row.campsite_user_id);
+        }
+        Ok(map)
     }
 }
 

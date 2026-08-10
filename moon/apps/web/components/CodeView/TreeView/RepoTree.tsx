@@ -80,7 +80,8 @@ const RepoTree = ({ onCommitInfoChange }: { onCommitInfoChange?: Function }) => 
 
     // Merge ancestors of the current path into the existing expanded set so that
     // navigating into a nested folder does not collapse previously opened parents
-    // or sibling branches.
+    // or sibling branches. Only runs on basePath change — intentional collapses
+    // while staying on the same path are preserved by handleNodeToggle.
     setExpandedNodes(Array.from(new Set([...expandedNodes, ...pathsToExpand])))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [basePath])
@@ -168,9 +169,9 @@ const RepoTree = ({ onCommitInfoChange }: { onCommitInfoChange?: Function }) => 
   const handleLabelClick = useCallback(
     (path: string, isDirectory: boolean) => {
       if (isDirectory) {
-        // Keep ancestors (and this folder) expanded across navigation.
-        setExpandedNodes(Array.from(new Set([...expandedNodes, ...generateExpandedPaths(path)])))
-
+        // Do not force-expand here — icon clicks used to bubble into onItemClick and
+        // this would immediately undo a collapse. Ancestors are expanded by the
+        // basePath effect after navigation.
         const fullPath = `/${scope}/code/tree/${version}${path}`
         const cleanPath = fullPath.replace(/\/+/g, '/')
 
@@ -183,7 +184,7 @@ const RepoTree = ({ onCommitInfoChange }: { onCommitInfoChange?: Function }) => 
         router.push(blobPath)
       }
     },
-    [router, scope, version, expandedNodes, setExpandedNodes]
+    [router, scope, version]
   )
 
   // Navigate on click, not focus — focus also fires after remount/selection and
