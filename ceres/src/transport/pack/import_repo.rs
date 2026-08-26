@@ -27,7 +27,7 @@ use io_orbit::object_storage::MultiObjectByteStream;
 use jupiter::{
     redis::lock::RedLock,
     service::git_service::GitService,
-    storage::{Storage, git_db_storage::GitDbStorage},
+    storage::{Storage, base_storage::StorageConnector, git_db_storage::GitDbStorage},
     utils::converter::FromGitModel,
 };
 use tokio::sync::mpsc::{self, Sender};
@@ -363,10 +363,25 @@ impl RepoHandler for ImportRepo {
                     .await
                     .map_err(|e| GitError::CustomError(e.to_string()))?;
             }
-            CommandType::Delete => storage
-                .remove_ref(self.repo.repo_id, &refs.ref_name)
-                .await
-                .map_err(|e| GitError::CustomError(e.to_string()))?,
+            CommandType::Delete => {
+                // The advertised old id is the client's lease; a stale request
+                // must not remove a tag that moved after ref discovery.
+                if !storage
+                    .remove_ref_if_unchanged(
+                        self.repo.repo_id,
+                        &refs.ref_name,
+                        &refs.old_id,
+                        storage.get_connection(),
+                    )
+                    .await
+                    .map_err(|e| GitError::CustomError(e.to_string()))?
+                {
+                    return Err(GitError::CustomError(format!(
+                        "tag {} moved since advertisement (expected {})",
+                        refs.ref_name, refs.old_id
+                    )));
+                }
+            }
             CommandType::Update => {
                 storage
                     .update_ref(self.repo.repo_id, &refs.ref_name, &refs.new_id)
@@ -384,6 +399,34 @@ impl RepoHandler for ImportRepo {
             .await
             .unwrap()
             .is_some()
+    }
+
+    /// A pushed tag may reference an annotated tag object, commit, tree, or
+    /// blob; accept it only if that object is stored.
+    async fn check_object_exist(&self, hash: &str) -> bool {
+        let git_db = self.storage.git_db_storage();
+        if git_db
+            .get_tag_by_hash(self.repo.repo_id, hash)
+            .await
+            .unwrap()
+            .is_some()
+            || self.check_commit_exist(hash).await
+        {
+            return true;
+        }
+        if git_db
+            .get_tree_by_hash(self.repo.repo_id, hash)
+            .await
+            .unwrap()
+            .is_some()
+        {
+            return true;
+        }
+        !git_db
+            .get_blobs_by_hashes(self.repo.repo_id, vec![hash.to_string()])
+            .await
+            .unwrap()
+            .is_empty()
     }
 
     async fn check_default_branch(&self) -> bool {
@@ -404,7 +447,11 @@ impl RepoHandler for ImportRepo {
                 .lock()
                 .expect("command_list lock poisoned");
             cmds.iter()
-                .find(|c| c.ref_type == RefTypeEnum::Branch && c.new_id != ZERO_ID)
+                .find(|c| {
+                    c.ref_type == RefTypeEnum::Branch
+                        && c.status == "ok"
+                        && c.new_id != ZERO_ID
+                })
                 .map(|c| c.new_id.clone())
         };
         let current_head = match from_commands {

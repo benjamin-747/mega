@@ -11,9 +11,9 @@ use common::{
 };
 use futures::Stream;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseTransaction, DbBackend, DbErr, EntityTrait,
-    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QueryTrait, Set, TransactionTrait,
-    sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr,
+    EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QueryTrait, Set,
+    TransactionTrait, sea_query::Expr,
 };
 
 use crate::storage::base_storage::{BaseStorage, StorageConnector};
@@ -164,6 +164,25 @@ impl GitDbStorage {
             .exec(txn)
             .await?;
         Ok(())
+    }
+
+    /// Deletes the ref only if it still points at `expected_git_id`, reporting
+    /// whether a row was removed. Enforces receive-pack's advertised-old-id
+    /// lease atomically: a concurrent push that moved the ref leaves it intact.
+    pub async fn remove_ref_if_unchanged<C: ConnectionTrait>(
+        &self,
+        repo_id: i64,
+        ref_name: &str,
+        expected_git_id: &str,
+        conn: &C,
+    ) -> Result<bool, MegaError> {
+        let result = import_refs::Entity::delete_many()
+            .filter(import_refs::Column::RepoId.eq(repo_id))
+            .filter(import_refs::Column::RefName.eq(ref_name))
+            .filter(import_refs::Column::RefGitId.eq(expected_git_id))
+            .exec(conn)
+            .await?;
+        Ok(result.rows_affected > 0)
     }
 
     pub async fn update_ref_in_txn(
@@ -514,9 +533,22 @@ impl GitDbStorage {
             .map(|m| (m, num_items))?)
     }
 
-    /// Find single tag by repo id and tag name
-    pub async fn get_tag_by_repo_and_name(
+    /// Find a stored annotated tag object by its object id.
+    pub async fn get_tag_by_hash(
         &self,
+        repo_id: i64,
+        tag_id: &str,
+    ) -> Result<Option<git_tag::Model>, MegaError> {
+        let result = git_tag::Entity::find()
+            .filter(git_tag::Column::RepoId.eq(repo_id))
+            .filter(git_tag::Column::TagId.eq(tag_id.to_string()))
+            .one(self.get_connection())
+            .await?;
+        Ok(result)
+    }
+
+    /// Find single tag by repo id and tag name
+    pub async fn get_tag_by_repo_and_name(        &self,
         repo_id: i64,
         name: &str,
     ) -> Result<Option<git_tag::Model>, MegaError> {

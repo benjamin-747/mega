@@ -15,7 +15,7 @@ use crate::{
         pack::PackByteStream,
         protocol::{
             Capability, ServiceType, SideBind, SmartSession, TransportProtocol, ZERO_ID,
-            import_refs::RefCommand,
+            import_refs::{CommandType, RefCommand},
         },
     },
 };
@@ -226,7 +226,7 @@ impl SmartSession {
         &mut self,
         state: &TransportRuntime,
         commands: Vec<RefCommand>,
-        data_stream: PackByteStream,
+        pack_stream: Option<PackByteStream>,
     ) -> Result<Bytes, ProtocolError> {
         let t0 = Instant::now();
         let mut timings_ms: BTreeMap<String, u128> = BTreeMap::new();
@@ -238,21 +238,91 @@ impl SmartSession {
             .repo_handler_with_commands(state, commands.clone())
             .await?;
         let is_monorepo = repo_handler.is_monorepo();
-        //1. unpack progress
+        // Monorepo state advances only through CL merges: a deletion's new id
+        // is the zero id and resolves no commit to materialize a ref update
+        // from, and tag refs are managed through the tag API rather than
+        // receive-pack (pushed tags were never persisted here). Reject both up
+        // front instead of failing later with opaque errors or silently
+        // writing unrelated refs. Import repos handle their own deletions.
+        if is_monorepo {
+            for command in commands.iter_mut() {
+                if command.command_type == CommandType::Delete {
+                    command.failed(format!(
+                        "deleting {} is not supported on monorepo",
+                        command.ref_name
+                    ));
+                } else if command.ref_type == RefTypeEnum::Tag {
+                    command.failed(
+                        "tag pushes are not supported on monorepo; \
+                         manage tags through the tag API"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        // A pack-less push carries no objects, so every surviving non-deletion
+        // command must target an object the server already stores; real git
+        // clients never send otherwise ("everything up-to-date" sends no
+        // request at all). Tags may reference any stored object type; branches
+        // must point at a commit. Fail unverifiable commands here rather than
+        // persisting dangling refs or tripping finalization later.
+        if pack_stream.is_none() {
+            for command in commands.iter_mut() {
+                if command.status != "ok" || command.command_type == CommandType::Delete {
+                    continue;
+                }
+                let exists = match command.ref_type {
+                    RefTypeEnum::Branch => repo_handler.check_commit_exist(&command.new_id).await,
+                    _ => repo_handler.check_object_exist(&command.new_id).await,
+                };
+                if !exists {
+                    command.failed(format!("target object {} not found", command.new_id));
+                }
+            }
+        }
+        // Each monorepo push materializes a single CL from one branch tip;
+        // multiple updates would overwrite each other's CL ref while all
+        // reporting success. Count only commands that survived validation.
+        // (Packed pushes hit the same restriction in check_entry.)
+        if is_monorepo {
+            let mut surviving_branch_update = false;
+            for command in commands.iter_mut() {
+                if command.ref_type == RefTypeEnum::Branch && command.status == "ok" {
+                    if surviving_branch_update {
+                        command.failed(
+                            "monorepo pushes support at most one branch update".to_string(),
+                        );
+                    } else {
+                        surviving_branch_update = true;
+                    }
+                }
+            }
+        }
+        // 1. unpack progress. Pack-less pushes (e.g. ref deletions) carry no packfile
+        //    after the command flush, so unpack is skipped entirely.
         let t_unpack = Instant::now();
-        let receiver = repo_handler
-            .unpack_stream(&state.storage.config().pack, data_stream)
-            .await?;
+        let receiver = match pack_stream {
+            Some(stream) => Some(
+                repo_handler
+                    .unpack_stream(&state.storage.config().pack, stream)
+                    .await?,
+            ),
+            None => None,
+        };
         timings_ms.insert(
             "unpack_stream_ms".to_string(),
             t_unpack.elapsed().as_millis(),
         );
 
         let t_receiver = Instant::now();
-        let unpack_result = repo_handler
-            .clone()
-            .receiver_handler(receiver.0, receiver.1)
-            .await;
+        let unpack_result = if let Some((receiver, rx_pack_id)) = receiver {
+            repo_handler
+                .clone()
+                .receiver_handler(receiver, rx_pack_id)
+                .await
+        } else {
+            Ok(())
+        };
         timings_ms.insert(
             "receiver_handler_ms".to_string(),
             t_receiver.elapsed().as_millis(),
@@ -269,7 +339,11 @@ impl SmartSession {
         //    mono and import both persist branch refs inside `finalize_receive_pack`.
         for command in commands.iter_mut() {
             if command.ref_type == RefTypeEnum::Tag {
-                // just update if refs type is tag
+                // Already-rejected commands (e.g. monorepo deletions) keep
+                // their up-front failure reason instead of being re-processed.
+                if command.status != "ok" {
+                    continue;
+                }
                 if let Err(e) = repo_handler.update_refs(command).await {
                     command.failed(e.to_string());
                 }
@@ -299,7 +373,13 @@ impl SmartSession {
 
         let mut finalize_ms: Option<u128> = None;
         let mut bind_ms: Option<u128> = None;
-        if !unpack_failed {
+        // Skip finalize when no branch command survived validation: rejected
+        // deletions, missing-target updates, or tag-only pushes have no branch
+        // work to finalize, and finalize consumers assume a usable branch tip.
+        let has_branch_work = commands
+            .iter()
+            .any(|c| c.ref_type == RefTypeEnum::Branch && c.status == "ok");
+        if !unpack_failed && has_branch_work {
             let t_finalize = Instant::now();
             if let Err(e) = repo_handler.finalize_receive_pack().await {
                 let msg = e.to_string();
