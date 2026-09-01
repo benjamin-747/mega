@@ -72,11 +72,9 @@ const CloneTabs = () => {
           >
             <Tabs.Root defaultValue={active_tab} onValueChange={setActiveTab}>
               <Tabs.List size='1' className='p-2'>
-                <Tabs.Trigger value='HTTP' asChild>
-                  <Button variant={active_tab === 'HTTP' ? 'flat' : 'plain'}>HTTP</Button>
-                </Tabs.Trigger>
-                <Tabs.Trigger value='SSH' asChild style={{ marginLeft: '10px' }}>
-                  <Button variant={active_tab === 'SSH' ? 'flat' : 'plain'}>SSH</Button>
+                <Tabs.Trigger value='HTTP'>HTTP</Tabs.Trigger>
+                <Tabs.Trigger value='SSH' style={{ marginLeft: '10px' }}>
+                  SSH
                 </Tabs.Trigger>
               </Tabs.List>
               <Box pt='3'>
