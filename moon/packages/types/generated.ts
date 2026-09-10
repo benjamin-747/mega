@@ -5858,6 +5858,8 @@ export type StartRunnerRequest = {
   image_memory_mb?: number | null
   image_path?: string | null
   image_url?: string | null
+  /** Catalog image id from GET /api/v1/orion/images. */
+  image_id?: string | null
   /** Force recreate when a Running VM already exists for this mono's domain. */
   replace?: boolean
   /**

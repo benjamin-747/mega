@@ -245,15 +245,57 @@ async fn start_runner(
     let build = &state.services().storage().config().build;
     let env = derive_runner_env(build)?;
 
+    let mut image_path = req.image_path;
+    let mut image_url = req.image_url;
+    let mut image_digest = req.image_digest;
+
+    if let Some(image_id) = req
+        .image_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if image_path.is_some() || image_url.is_some() {
+            return Err(ApiError::bad_request(anyhow!(
+                "image_id cannot be combined with image_path or image_url"
+            )));
+        }
+        let model = state
+            .services()
+            .storage()
+            .orion_vm_image_service
+            .get(image_id)
+            .await
+            .map_err(ApiError::from)?
+            .ok_or_else(|| {
+                ApiError::with_status(StatusCode::NOT_FOUND, anyhow!("image_id not found"))
+            })?;
+        let url = state
+            .services()
+            .storage()
+            .orion_vm_image_service
+            .signed_get_url(&model)
+            .await
+            .map_err(|e| {
+                ApiError::with_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    anyhow!("failed to sign image URL: {e}"),
+                )
+            })?;
+        image_url = Some(url);
+        image_digest = Some(model.digest);
+        image_path = None;
+    }
+
     let payload = StartRunnerPayload {
         target: req.target,
         replace: req.replace,
         server_ws: env.server_ws,
         scorpio_base_url: env.scorpio_base_url,
         scorpio_lfs_url: env.scorpio_lfs_url,
-        image_path: req.image_path,
-        image_url: req.image_url,
-        image_digest: req.image_digest,
+        image_path,
+        image_url,
+        image_digest,
         image_disk_gb: req.image_disk_gb,
         image_cpus: req.image_cpus,
         image_memory_mb: req.image_memory_mb,

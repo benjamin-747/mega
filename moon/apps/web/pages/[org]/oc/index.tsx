@@ -15,6 +15,7 @@ import { Button, UIText } from '@gitmono/ui'
 import { RefreshIcon } from '@gitmono/ui/Icons'
 
 import { AppLayout } from '@/components/Layout/AppLayout'
+import { OrionImagesTable } from '@/components/OrionClient/OrionImagesTable'
 import {
   domainFromClientHostname,
   OrionClient,
@@ -25,6 +26,7 @@ import {
 import AuthAppProviders from '@/components/Providers/AuthAppProviders'
 import { useAdminCheck } from '@/hooks/admin/useAdminCheck'
 import { usePostOrionClientsInfo } from '@/hooks/OrionClient/OrionClientsInfo'
+import { useGetOrionImages } from '@/hooks/OrionClient/useGetOrionImages'
 import { useGetRunnerList } from '@/hooks/OrionClient/useGetRunnerList'
 import { useGetRunnerStatus } from '@/hooks/OrionClient/useGetRunnerStatus'
 import { usePostStartRunner } from '@/hooks/OrionClient/usePostStartRunner'
@@ -83,6 +85,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
   const [terminalClientId, setTerminalClientId] = React.useState<string | null>(null)
   const [terminalDomain, setTerminalDomain] = React.useState<string | null>(null)
   const [copyFeedback, setCopyFeedback] = React.useState(false)
+  const [selectedImageId, setSelectedImageId] = React.useState<string>('')
   const logPanelRef = React.useRef<HTMLDivElement>(null)
   const terminalPanelRef = React.useRef<HTMLDivElement>(null)
   const logsScrollRef = React.useRef<HTMLDivElement>(null)
@@ -105,6 +108,11 @@ const OrionClientPage: PageWithLayout<any> = () => {
     error: runnerListError,
     refetch: refetchRunners
   } = useGetRunnerList(isAdmin)
+  const {
+    data: orionImages = [],
+    isLoading: isLoadingImages,
+    error: orionImagesError
+  } = useGetOrionImages(isAdmin)
   const runnerStatusVmId = logSource === 'runner' ? activeLogKey : null
   const { data: runnerStatus } = useGetRunnerStatus(runnerStatusVmId, activePhase)
   const { logs: runnerLogs, status: runnerLogsStatus, error: runnerLogsError } = useRunnerLogsSSE(activeLogKey)
@@ -259,7 +267,10 @@ const OrionClientPage: PageWithLayout<any> = () => {
   const handleStartRunner = React.useCallback(
     (replace = false) => {
       startRunner(
-        { replace },
+        {
+          replace,
+          ...(selectedImageId ? { image_id: selectedImageId } : {})
+        },
         {
           onSuccess: (data) => {
             openLogPanel(data.vm_id, 'runner', {
@@ -270,7 +281,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
         }
       )
     },
-    [openLogPanel, startRunner]
+    [openLogPanel, selectedImageId, startRunner]
   )
 
   const handleViewClientLogs = React.useCallback(
@@ -414,13 +425,39 @@ const OrionClientPage: PageWithLayout<any> = () => {
             </div>
             <div className='flex flex-wrap items-center gap-2'>
               {isAdmin ? (
-                <Button
-                  variant='primary'
-                  onClick={() => handleStartRunner(true)}
-                  disabled={isStartingRunner || activePhase === 'provisioning'}
-                >
-                  {isStartingRunner ? 'Starting…' : 'Start Runner'}
-                </Button>
+                <>
+                  <label className='flex items-center gap-2 text-sm'>
+                    <span className='text-muted whitespace-nowrap'>Image</span>
+                    <select
+                      className='max-w-xs rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-900'
+                      value={selectedImageId}
+                      onChange={(e) => setSelectedImageId(e.target.value)}
+                      disabled={isStartingRunner || isLoadingImages}
+                    >
+                      <option value=''>Default (scheduler config)</option>
+                      {orionImages.map((img) => (
+                        <option key={img.id} value={img.id}>
+                          {[
+                            img.built_at?.slice(0, 10) || 'unknown',
+                            img.rust ? `rust ${img.rust}` : null,
+                            img.python ? `py ${img.python}` : null,
+                            img.buck2 ? `buck2 ${img.buck2}` : null,
+                            img.digest?.replace(/^sha256:/, '').slice(0, 8)
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <Button
+                    variant='primary'
+                    onClick={() => handleStartRunner(true)}
+                    disabled={isStartingRunner || activePhase === 'provisioning'}
+                  >
+                    {isStartingRunner ? 'Starting…' : 'Start Runner'}
+                  </Button>
+                </>
               ) : null}
               {!showingOverlay ? (
                 <Button
@@ -682,6 +719,18 @@ const OrionClientPage: PageWithLayout<any> = () => {
 
         {!showingOverlay ? (
           <>
+            {isAdmin ? (
+              <div className='flex min-w-0 flex-col gap-2'>
+                <UIText weight='font-semibold' size='text-sm'>
+                  VM images
+                </UIText>
+                <OrionImagesTable
+                  images={orionImages}
+                  isLoading={isLoadingImages}
+                  error={orionImagesError instanceof Error ? orionImagesError : null}
+                />
+              </div>
+            ) : null}
             <RunnersTable
               runners={isAdmin ? (runnerList?.runners ?? []) : []}
               clients={clients}

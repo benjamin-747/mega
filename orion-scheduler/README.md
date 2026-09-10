@@ -149,6 +149,20 @@ curl -X POST http://localhost:8080/webhook \
 
 > `image_path` 与 `image_url` 互斥，不可同时指定。提供镜像参数时 `image_digest` 必须提供（格式：`sha256:...` 或 `sha512:...`）。未传任何 `image_*` 字段时，scheduler 使用 `target_config.json` 中的 `default_image` 块。
 
+### 镜像 catalog（RustFS + mono）
+
+构建脚本可将 qcow2 上传到 RustFS，并注册到 mono：
+
+| Env | 说明 |
+|-----|------|
+| `RUSTFS_ENDPOINT` / `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` / `RUSTFS_BUCKET` | S3 兼容上传（path-style） |
+| `ORION_IMAGE_REGISTER_URL` | 通常为 `https://<mono>/api/v1/orion/images` |
+| `ORION_IMAGE_REGISTER_TOKEN` | 管理员 Bearer token |
+
+对象键：`orion-images/{sha256_hex}/debian-13-buck2.qcow2` + `image-info.json`。
+
+Campsite POC：镜像列表展示 rust / python / buck2 / kernel；Start Runner 可选 catalog 项（`POST /api/v1/orion/runners` 的 `image_id`）。mono 解析为预签名 `image_url` + `image_digest` 再调 scheduler `/webhook`。
+
 ### GHA / 外部 webhook 迁移
 
 旧版 webhook 通过 `target` 名称在 `target_config.json` 的 `targets` 中查表获取环境 URL。该机制已移除；调用方必须在请求体中内联传入 `server_ws`、`scorpio_base_url`、`scorpio_lfs_url`。`target` 字段仍可选，仅用于日志标签。
@@ -198,7 +212,7 @@ sudo bash scripts/build-custom-image.sh
 3. 通过 `qemu-nbd` 挂载、`growpart` + `resize2fs` 扩展分区；若基础镜像目录缺少 `vmlinuz-*` / `initrd.img-*`，自动从镜像内 `/boot` 提取
 4. chroot 进入镜像并安装：
    - Rust 1.95.0 toolchain（在 host 上预下载 tarball，避免 chroot 内 DNS 问题）
-   - apt 包：`clang lld pkg-config protobuf-compiler zstd fuse curl git seccomp libseccomp-dev libpython3-dev openssl libssl-dev build-essential`
+   - apt 包：`clang lld pkg-config libelf-dev protobuf-compiler zstd fuse curl git seccomp libseccomp-dev libpython3-dev openssl libssl-dev build-essential`
    - buck2（`2026-04-15` 版本）
    - SSH 公钥写入 `/root/.ssh/authorized_keys`
    - 软链 `rustc` / `cargo` → `/usr/local/bin/`，确保默认 PATH 可找到
@@ -344,6 +358,7 @@ Release bundle 内部结构：
 orion-scheduler-vX.Y.Z-linux-amd64/
 ├── bin/orion-scheduler
 ├── etc/target_config.json.template
+├── etc/needrestart-orion-scheduler.conf
 ├── systemd/orion-scheduler.service
 ├── install.sh
 └── VERSION
@@ -379,10 +394,13 @@ sudo journalctl -u orion-scheduler -f
 | qlean 状态目录    | `/var/lib/orion-scheduler/qlean/{images,runs}`，软链到 `~orion/.local/share/qlean` |
 | 日志 & 缓存       | `/var/log/orion-scheduler`、`/var/cache/orion-scheduler`                        |
 | systemd       | `/etc/systemd/system/orion-scheduler.service`，`daemon-reload` + `enable`       |
+| needrestart   | `/etc/needrestart/conf.d/orion-scheduler.conf`（存在 `conf.d` 时安装；禁止 apt 钩子自动重启本服务） |
 
 可用环境变量覆盖默认值：`PREFIX` / `ETC_DIR` / `STATE_DIR` / `LOG_DIR` / `CACHE_DIR` / `SERVICE_USER` / `SERVICE_GROUP` / `SKIP_ENABLE=1`。
 
 升级时，下载新 tarball 再跑一次 `install.sh` 即可——配置不会被覆盖，systemd unit 会重启。
+
+**VM 一夜消失**：`unattended-upgrade` + needrestart 曾会对本服务发 SIGTERM，从而关掉全部跟踪中的 QEMU。装好上述 drop-in 后应不再发生；若仍出现，查 `journalctl -u orion-scheduler` 是否有 `Received SIGTERM`，并确认 `/etc/needrestart/conf.d/orion-scheduler.conf` 在位。
 
 ### 升级 / 回滚
 

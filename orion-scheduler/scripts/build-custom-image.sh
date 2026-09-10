@@ -673,7 +673,7 @@ cat /etc/apt/mirrors/debian.list 2>/dev/null || true
 cat /etc/apt/mirrors/debian-security.list 2>/dev/null || true
 apt-get update
 apt-get install -y \
-    clang lld pkg-config protobuf-compiler zstd fuse curl git nginx \
+    clang lld pkg-config libelf-dev protobuf-compiler zstd fuse curl git nginx \
     seccomp libseccomp-dev libpython3-dev openssl libssl-dev build-essential ca-certificates
 
 echo "=== [chroot] Verifying installed tools ==="
@@ -1032,6 +1032,109 @@ if [ -z "${NEW_DIGEST:-}" ]; then
 fi
 
 fix_qlean_ownership
+
+# ============================================================================
+# Stage 8 (optional): Upload to RustFS and register with mono catalog
+# ============================================================================
+log_stage "8-rustfs-upload"
+upload_and_register_orion_image() {
+    local image_file="$1"
+    local digest_hex="$2"
+    local info_file="$3"
+
+    if [ -z "${RUSTFS_ENDPOINT:-}" ] || [ -z "${RUSTFS_ACCESS_KEY:-}" ] \
+        || [ -z "${RUSTFS_SECRET_KEY:-}" ] || [ -z "${RUSTFS_BUCKET:-}" ]; then
+        echo "[build-custom-image] RustFS env incomplete; skipping upload/register"
+        echo "[build-custom-image]   set RUSTFS_ENDPOINT RUSTFS_ACCESS_KEY RUSTFS_SECRET_KEY RUSTFS_BUCKET"
+        return 0
+    fi
+    if ! command -v aws >/dev/null 2>&1; then
+        echo "[build-custom-image] WARNING: aws CLI not found; skipping RustFS upload" >&2
+        return 0
+    fi
+
+    local object_key="${digest_hex}/${IMAGE_NAME}.qcow2"
+    local info_key="${digest_hex}/image-info.json"
+    local s3_qcow2="s3://${RUSTFS_BUCKET}/orion-images/${object_key}"
+    local s3_info="s3://${RUSTFS_BUCKET}/orion-images/${info_key}"
+
+    echo "[build-custom-image] Uploading qcow2 to ${s3_qcow2} ..."
+    AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
+    AWS_DEFAULT_REGION="${RUSTFS_REGION:-us-east-1}" \
+    aws --endpoint-url "$RUSTFS_ENDPOINT" s3 cp \
+        --only-show-errors \
+        "$image_file" "$s3_qcow2"
+
+    if [ -f "$info_file" ]; then
+        echo "[build-custom-image] Uploading sidecar to ${s3_info} ..."
+        AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
+        AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
+        AWS_DEFAULT_REGION="${RUSTFS_REGION:-us-east-1}" \
+        aws --endpoint-url "$RUSTFS_ENDPOINT" s3 cp \
+            --only-show-errors \
+            "$info_file" "$s3_info"
+    fi
+
+    if [ -z "${ORION_IMAGE_REGISTER_URL:-}" ] || [ -z "${ORION_IMAGE_REGISTER_TOKEN:-}" ]; then
+        echo "[build-custom-image] ORION_IMAGE_REGISTER_URL/TOKEN unset; upload done, catalog not registered"
+        return 0
+    fi
+
+    local size_bytes built_at rust_ver buck2_ver python_ver kernel_ver
+    size_bytes=$(stat -c%s "$image_file")
+    built_at=$(jq -r '.built_at // empty' "$info_file" 2>/dev/null || true)
+    rust_ver=$(jq -r '.rust // empty' "$info_file" 2>/dev/null || true)
+    buck2_ver=$(jq -r '.buck2 // empty' "$info_file" 2>/dev/null || true)
+    python_ver=$(jq -r '.python // empty' "$info_file" 2>/dev/null || true)
+    kernel_ver=$(jq -r '.kernel // empty' "$info_file" 2>/dev/null || true)
+
+    local body
+    body=$(jq -n \
+        --arg digest "sha256:${digest_hex}" \
+        --arg object_key "$object_key" \
+        --arg info_object_key "$info_key" \
+        --arg image_name "$IMAGE_NAME" \
+        --arg built_at "$built_at" \
+        --arg rust "$rust_ver" \
+        --arg buck2 "$buck2_ver" \
+        --arg python "$python_ver" \
+        --arg kernel "$kernel_ver" \
+        --argjson size_bytes "$size_bytes" \
+        '{
+          digest: $digest,
+          object_key: $object_key,
+          info_object_key: $info_object_key,
+          image_name: $image_name,
+          built_at: (if $built_at == "" then null else $built_at end),
+          rust: (if $rust == "" then null else $rust end),
+          buck2: (if $buck2 == "" then null else $buck2 end),
+          python: (if $python == "" then null else $python end),
+          kernel: (if $kernel == "" then null else $kernel end),
+          size_bytes: $size_bytes
+        }')
+
+    echo "[build-custom-image] Registering catalog at $ORION_IMAGE_REGISTER_URL ..."
+    if ! curl -fsS -X POST "$ORION_IMAGE_REGISTER_URL" \
+        -H "Authorization: Bearer ${ORION_IMAGE_REGISTER_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$body"; then
+        echo "[build-custom-image] WARNING: catalog register failed (objects may still be in RustFS)" >&2
+        return 0
+    fi
+    echo ""
+    echo "[build-custom-image] Catalog register OK"
+}
+
+PUBLISH_SOURCE="$PUBLISHED_IMAGE"
+if [ ! -f "$PUBLISH_SOURCE" ]; then
+    PUBLISH_SOURCE="$CUSTOM_IMAGE"
+fi
+INFO_SIDECAR="$OUTPUT_DIR/${IMAGE_NAME}.image-info.json"
+if [ ! -f "$INFO_SIDECAR" ]; then
+    INFO_SIDECAR="$IMAGE_DIR/image-info.json"
+fi
+upload_and_register_orion_image "$PUBLISH_SOURCE" "$NEW_DIGEST" "$INFO_SIDECAR"
 
 log_stage "done"
 echo ""

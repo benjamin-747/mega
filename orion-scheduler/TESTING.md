@@ -240,20 +240,33 @@ fuser 8080/tcp 2>/dev/null || echo "Port 8080 is free"
 
 ---
 
-## 4. 构建镜像并上传到 S3
+## 4. 构建镜像并上传到 RustFS
 
 ```bash
 sudo modprobe nbd max_part=8
-sudo bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
-# 输出 sha256:<hex>，用作 webhook 的 image_digest
+
+export RUSTFS_ENDPOINT=https://rustfs.example.com
+export RUSTFS_ACCESS_KEY=...
+export RUSTFS_SECRET_KEY=...
+export RUSTFS_BUCKET=mega
+export ORION_IMAGE_REGISTER_URL=https://git.example.com/api/v1/orion/images
+export ORION_IMAGE_REGISTER_TOKEN=<admin Bearer token>
+
+sudo -E bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
+# 本地仍发布到 ~/.local/share/qlean/images/
+# 若 env 齐全：上传 orion-images/{sha256}/… 并 POST 注册 catalog
 ```
 
-```bash
-aws s3 cp ~/.local/share/qlean/images/debian-13-buck2/debian-13-buck2.qcow2 \
-  s3://gitmega/images/debian-13-buck2.qcow2 --progress
+对象布局：
+
+```text
+orion-images/{sha256_hex}/debian-13-buck2.qcow2
+orion-images/{sha256_hex}/image-info.json
 ```
 
-`image_digest` 使用构建脚本输出的本地文件 hash；上传前后内容不变则 hash 一致。
+UI（Campsite POC）通过 `GET /api/v1/orion/images` 列出工具链版本；Start Runner 传 `image_id`，mono 签发预签名 URL 给 scheduler。
+
+未设 RustFS / register env 时脚本只做本地发布（与以前相同）。
 
 ---
 
@@ -272,4 +285,6 @@ aws s3 cp ~/.local/share/qlean/images/debian-13-buck2/debian-13-buck2.qcow2 \
 | Scorpio 挂载问题 | `curl '.../scorpio/status?domain=...'`（看 `disk.df_root` / `disk.du`） |
 | Guest 磁盘打满 / worker Lost | VM 内 `df -h /`；清 `/data/scorpio/antares/{upper,cl}` 或 `systemctl restart orion-runner`；新盘建议 `image_disk_gb: 50` |
 | 重启后状态丢了 | 内存 map；磁盘 qemu 靠启动 reap；重新 POST webhook |
+| 镜像 catalog 为空 | 构建时设 RustFS + `ORION_IMAGE_REGISTER_*`；查 mono `GET /api/v1/orion/images` |
+| Start Runner 选镜像失败 | mono 对象存储需支持预签名（RustFS/S3）；本地 backend 无 signed URL |
 | 进 VM 调试 | [SSH 进入 VM](#ssh-进入-vm) |
