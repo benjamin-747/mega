@@ -15,10 +15,10 @@ import { Button, UIText } from '@gitmono/ui'
 import { RefreshIcon } from '@gitmono/ui/Icons'
 
 import { AppLayout } from '@/components/Layout/AppLayout'
-import { OrionImagesTable } from '@/components/OrionClient/OrionImagesTable'
 import {
   domainFromClientHostname,
   OrionClient,
+  OrionClientPageWrapper,
   OrionClientStatus,
   RunnersTable,
   VmTerminal
@@ -108,11 +108,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
     error: runnerListError,
     refetch: refetchRunners
   } = useGetRunnerList(isAdmin)
-  const {
-    data: orionImages = [],
-    isLoading: isLoadingImages,
-    error: orionImagesError
-  } = useGetOrionImages(isAdmin)
+  const { data: orionImages = [], isLoading: isLoadingImages } = useGetOrionImages(isAdmin)
   const runnerStatusVmId = logSource === 'runner' ? activeLogKey : null
   const { data: runnerStatus } = useGetRunnerStatus(runnerStatusVmId, activePhase)
   const { logs: runnerLogs, status: runnerLogsStatus, error: runnerLogsError } = useRunnerLogsSSE(activeLogKey)
@@ -414,6 +410,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
       <Head>
         <title>Orion Client</title>
       </Head>
+      <OrionClientPageWrapper>
       {/* AppLayout main is overflow-hidden; this page must own scrolling when the list is visible. */}
       <div
         className={`flex h-full min-h-0 flex-col gap-4 p-4 ${showingOverlay ? 'overflow-hidden' : 'overflow-y-auto'}`}
@@ -719,18 +716,6 @@ const OrionClientPage: PageWithLayout<any> = () => {
 
         {!showingOverlay ? (
           <>
-            {isAdmin ? (
-              <div className='flex min-w-0 flex-col gap-2'>
-                <UIText weight='font-semibold' size='text-sm'>
-                  VM images
-                </UIText>
-                <OrionImagesTable
-                  images={orionImages}
-                  isLoading={isLoadingImages}
-                  error={orionImagesError instanceof Error ? orionImagesError : null}
-                />
-              </div>
-            ) : null}
             <RunnersTable
               runners={isAdmin ? (runnerList?.runners ?? []) : []}
               clients={clients}
@@ -761,6 +746,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
           </>
         ) : null}
       </div>
+      </OrionClientPageWrapper>
     </>
   )
 }

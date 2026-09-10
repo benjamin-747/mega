@@ -242,15 +242,41 @@ fuser 8080/tcp 2>/dev/null || echo "Port 8080 is free"
 
 ## 4. 构建镜像并上传到 RustFS
 
+多环境 fan-out（推荐；用 bootstrap secret 自动建 bot + 换票）：
+
 ```bash
 sudo modprobe nbd max_part=8
 
+export ORION_IMAGE_FANOUT='[
+  {
+    "name": "mega-dev",
+    "register_url": "https://git.example-dev/api/v1/orion/images",
+    "bootstrap_secret": "'"$MEGA_INIT_BOOTSTRAP_SECRET"'",
+    "rustfs_endpoint": "https://rustfs.example-dev",
+    "rustfs_access_key": "...",
+    "rustfs_secret_key": "...",
+    "rustfs_bucket": "...",
+    "rustfs_region": "us-east-1"
+  }
+]'
+# 或: export ORION_IMAGE_FANOUT=./orion-image-fanout.json
+# 亦可省略各目标 bootstrap_secret，统一 export MEGA_INIT_BOOTSTRAP_SECRET=...
+
+sudo -E bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
+```
+
+脚本对每个目标：`POST …/bots/bootstrap-orion-image`（`X-Mega-Init-Secret`）→ 用返回的 `bot_` token 调 `POST …/orion/images`。也可在目标里设静态 `token` 跳过 bootstrap。
+
+单环境兼容：
+
+```bash
 export RUSTFS_ENDPOINT=https://rustfs.example.com
 export RUSTFS_ACCESS_KEY=...
 export RUSTFS_SECRET_KEY=...
 export RUSTFS_BUCKET=mega
 export ORION_IMAGE_REGISTER_URL=https://git.example.com/api/v1/orion/images
-export ORION_IMAGE_REGISTER_TOKEN=<admin Bearer token>
+export MEGA_INIT_BOOTSTRAP_SECRET=...   # 推荐：自动 bootstrap
+# 或: export ORION_IMAGE_REGISTER_TOKEN=bot_...
 
 sudo -E bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
 # 本地仍发布到 ~/.local/share/qlean/images/
@@ -266,7 +292,28 @@ orion-images/{sha256_hex}/image-info.json
 
 UI（Campsite POC）通过 `GET /api/v1/orion/images` 列出工具链版本；Start Runner 传 `image_id`，mono 签发预签名 URL 给 scheduler。
 
-未设 RustFS / register env 时脚本只做本地发布（与以前相同）。
+未设 `ORION_IMAGE_FANOUT` / RustFS / register env 时脚本只做本地发布（与以前相同）。
+
+### 本地无法构建时的 mock 上传
+
+跳过 qemu/chroot，写 1MiB 假文件后直接走 Stage 8（无需 root）：
+
+```bash
+export MOCK_UPLOAD=1
+export MOCK_IMAGE_BYTES=1048576   # 可选，默认 1MiB
+export OUTPUT_DIR=/tmp/orion-mock-images
+export RUSTFS_ENDPOINT=http://127.0.0.1:19000
+export RUSTFS_ACCESS_KEY=rustfsadmin
+export RUSTFS_SECRET_KEY=rustfsadmin
+export RUSTFS_BUCKET=mega
+export ORION_IMAGE_REGISTER_URL=http://127.0.0.1:8000/api/v1/orion/images
+export MEGA_INIT_BOOTSTRAP_SECRET='...'   # 须与 mono 进程环境变量一致，且 ≥32 字符
+# mono 还需要 MEGA_BOT_TOKEN_HMAC_SECRET（≥32）才能签发 bot_ token
+
+bash orion-scheduler/scripts/build-custom-image.sh
+```
+
+`SKIP_BUILD=1` 与 `MOCK_UPLOAD=1` 等价。
 
 ---
 
@@ -285,6 +332,6 @@ UI（Campsite POC）通过 `GET /api/v1/orion/images` 列出工具链版本；St
 | Scorpio 挂载问题 | `curl '.../scorpio/status?domain=...'`（看 `disk.df_root` / `disk.du`） |
 | Guest 磁盘打满 / worker Lost | VM 内 `df -h /`；清 `/data/scorpio/antares/{upper,cl}` 或 `systemctl restart orion-runner`；新盘建议 `image_disk_gb: 50` |
 | 重启后状态丢了 | 内存 map；磁盘 qemu 靠启动 reap；重新 POST webhook |
-| 镜像 catalog 为空 | 构建时设 RustFS + `ORION_IMAGE_REGISTER_*`；查 mono `GET /api/v1/orion/images` |
+| 镜像 catalog 为空 | 构建时设 `ORION_IMAGE_FANOUT` 或 RustFS + `ORION_IMAGE_REGISTER_URL` + `MEGA_INIT_BOOTSTRAP_SECRET`（或静态 token）；查 mono `GET /api/v1/orion/images`；bootstrap 失败查 secret 是否与 mono 一致 |
 | Start Runner 选镜像失败 | mono 对象存储需支持预签名（RustFS/S3）；本地 backend 无 signed URL |
 | 进 VM 调试 | [SSH 进入 VM](#ssh-进入-vm) |

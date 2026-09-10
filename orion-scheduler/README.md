@@ -151,13 +151,44 @@ curl -X POST http://localhost:8080/webhook \
 
 ### 镜像 catalog（RustFS + mono）
 
-构建脚本可将 qcow2 上传到 RustFS，并注册到 mono：
+构建脚本可将 qcow2 上传到各环境 RustFS，并注册到对应 mono catalog。
+
+**鉴权（推荐）**：脚本在 register 前调用 `POST /api/v1/bots/bootstrap-orion-image`（header `X-Mega-Init-Secret` = 与 mono 相同的 `MEGA_INIT_BOOTSTRAP_SECRET`），自动创建 bot `orion-image-publisher` 并签发短命 `bot_` token；每次 bootstrap 会吊销旧的 `orion-image-register` token。
+
+**多环境 fan-out（推荐）**：设置 `ORION_IMAGE_FANOUT` 为 JSON 数组（内联）或文件路径（以 `/`、`./` 开头或以 `.json` 结尾）：
+
+```json
+[
+  {
+    "name": "mega-dev",
+    "register_url": "https://git.example-dev/api/v1/orion/images",
+    "bootstrap_secret": "...",
+    "rustfs_endpoint": "https://rustfs.example-dev",
+    "rustfs_access_key": "...",
+    "rustfs_secret_key": "...",
+    "rustfs_bucket": "...",
+    "rustfs_region": "us-east-1"
+  }
+]
+```
+
+| 字段 | 说明 |
+|------|------|
+| `bootstrap_secret` | 与该环境 mono 的 `MEGA_INIT_BOOTSTRAP_SECRET` 一致；缺省时用环境变量 `MEGA_INIT_BOOTSTRAP_SECRET` |
+| `bootstrap_url` | 可选；默认由 `register_url` 推导为 `…/api/v1/bots/bootstrap-orion-image` |
+| `token` | 可选；若设置则跳过 bootstrap，直接用该 Bearer |
+| 其余 | 该目标的 RustFS 与 `POST /api/v1/orion/images` |
+
+每个目标：上传 qcow2 + sidecar →（bootstrap 换票）→ POST register；单目标失败打 WARNING 并继续。
+
+**单环境兼容**：未设 `ORION_IMAGE_FANOUT` 时仍可用：
 
 | Env | 说明 |
 |-----|------|
 | `RUSTFS_ENDPOINT` / `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` / `RUSTFS_BUCKET` | S3 兼容上传（path-style） |
 | `ORION_IMAGE_REGISTER_URL` | 通常为 `https://<mono>/api/v1/orion/images` |
-| `ORION_IMAGE_REGISTER_TOKEN` | 管理员 Bearer token |
+| `MEGA_INIT_BOOTSTRAP_SECRET` | 推荐：自动 bootstrap publisher bot |
+| `ORION_IMAGE_REGISTER_TOKEN` | 可选：静态 `bot_` token（有则不再 bootstrap） |
 
 对象键：`orion-images/{sha256_hex}/debian-13-buck2.qcow2` + `image-info.json`。
 

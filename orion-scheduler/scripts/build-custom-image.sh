@@ -8,7 +8,16 @@
 #
 # Usage: sudo ./build-custom-image.sh
 #
-# Note: Must run as root because qemu-nbd / mount / chroot need it.
+# Mock upload (no qemu/chroot; no root required):
+#   MOCK_UPLOAD=1 OUTPUT_DIR=/tmp/orion-mock-images \
+#     RUSTFS_ENDPOINT=http://127.0.0.1:19000 \
+#     RUSTFS_ACCESS_KEY=... RUSTFS_SECRET_KEY=... RUSTFS_BUCKET=mega \
+#     ORION_IMAGE_REGISTER_URL=http://127.0.0.1:8000/api/v1/orion/images \
+#     MEGA_INIT_BOOTSTRAP_SECRET=... \
+#     bash scripts/build-custom-image.sh
+# Optional: MOCK_IMAGE_BYTES=1048576 (default 1MiB), SKIP_BUILD=1 (alias of MOCK_UPLOAD).
+#
+# Note: Real builds must run as root because qemu-nbd / mount / chroot need it.
 # Images are published to the invoking user's ~/.local/share/qlean/images
 # (e.g. /home/orion/... when run as `sudo -u` or `sudo` from user orion),
 # not /root/. Override with OUTPUT_DIR=... if needed.
@@ -149,6 +158,15 @@ log_cmd() {
     echo "[build-custom-image] \$ $*"
 }
 
+# Portable file size (GNU stat -c on Linux, BSD -f on macOS).
+file_size_bytes() {
+    if stat -c%s "$1" >/dev/null 2>&1; then
+        stat -c%s "$1"
+    else
+        stat -f%z "$1"
+    fi
+}
+
 # Unmount image tree safely. Never `rm -rf` the mount dir while /proc|/sys|/dev
 # are still bind-mounted — that prints endless "Operation not permitted" under
 # proc and can wedge the host. Prefer lazy umount if busy after Ctrl-C.
@@ -279,6 +297,54 @@ download_base_image() {
     mv "$part" "$BASE_IMAGE"
     echo "[build-custom-image] Base image downloaded and verified ($(du -sh "$BASE_IMAGE" | cut -f1))"
 }
+
+# ============================================================================
+# Mock path: skip qemu/chroot build; write a tiny fake qcow2 and jump to Stage 8.
+# ============================================================================
+MOCK_UPLOAD="${MOCK_UPLOAD:-${SKIP_BUILD:-0}}"
+PUBLISHED_IMAGE="$OUTPUT_DIR/$IMAGE_NAME.qcow2"
+PUBLISHED_JSON="$OUTPUT_DIR/$IMAGE_NAME.json"
+
+if [ "$MOCK_UPLOAD" = "1" ] || [ "$MOCK_UPLOAD" = "true" ]; then
+    log_stage "mock-publish"
+    MOCK_IMAGE_BYTES="${MOCK_IMAGE_BYTES:-1048576}"
+    echo "[build-custom-image] MOCK_UPLOAD=1: skipping real build"
+    echo "[build-custom-image] OUTPUT_DIR=$OUTPUT_DIR"
+    echo "[build-custom-image] MOCK_IMAGE_BYTES=$MOCK_IMAGE_BYTES"
+    mkdir -p "$IMAGE_DIR" "$OUTPUT_DIR"
+
+    # Pseudo-qcow2 payload (not a real qcow2; enough to exercise upload/register).
+    head -c "$MOCK_IMAGE_BYTES" /dev/urandom > "$CUSTOM_IMAGE"
+    cp "$CUSTOM_IMAGE" "$PUBLISHED_IMAGE"
+    NEW_DIGEST=$(shasum -a 256 "$PUBLISHED_IMAGE" 2>/dev/null | awk '{print $1}')
+    if [ -z "$NEW_DIGEST" ]; then
+        NEW_DIGEST=$(sha256sum "$PUBLISHED_IMAGE" | awk '{print $1}')
+    fi
+    cat > "$IMAGE_DIR/image-info.json" <<INFO_EOF
+{
+  "image_name": "${IMAGE_NAME}",
+  "built_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "rust": "${RUST_VERSION}",
+  "buck2": "${BUCK2_LABEL}",
+  "python": "${CPYTHON_VERSION}",
+  "kernel": "mock-kernel"
+}
+INFO_EOF
+    cp "$IMAGE_DIR/image-info.json" "$OUTPUT_DIR/${IMAGE_NAME}.image-info.json"
+    printf '%s  %s\n' "$NEW_DIGEST" "$IMAGE_NAME.qcow2" > "$IMAGE_DIR/checksums"
+    cat > "$PUBLISHED_JSON" <<JSON_EOF
+{
+  "path": "$PUBLISHED_IMAGE",
+  "digest": "sha256:$NEW_DIGEST",
+  "mock": true
+}
+JSON_EOF
+    echo "[build-custom-image] mock image: $PUBLISHED_IMAGE"
+    echo "[build-custom-image] mock digest: sha256:$NEW_DIGEST"
+
+    # Jump past real stages 1–7 into Stage 8 below.
+    :
+else
 
 # ============================================================================
 # Pre-flight: ensure base image (download if missing)
@@ -1033,56 +1099,196 @@ fi
 
 fix_qlean_ownership
 
+fi # end real-build else (MOCK_UPLOAD skipped stages 1–7)
+
 # ============================================================================
 # Stage 8 (optional): Upload to RustFS and register with mono catalog
+#
+# Prefer ORION_IMAGE_FANOUT (JSON array or path to .json) for multi-env fan-out.
+# Legacy single-target: RUSTFS_* + optional ORION_IMAGE_REGISTER_URL/TOKEN.
+# Register auth: optional static token, else bootstrap-orion-image with
+# MEGA_INIT_BOOTSTRAP_SECRET (creates orion-image-publisher bot + short-lived bot_ token).
 # ============================================================================
 log_stage "8-rustfs-upload"
-upload_and_register_orion_image() {
+
+resolve_orion_image_fanout_json() {
+    local raw="${ORION_IMAGE_FANOUT:-}"
+    if [ -z "$raw" ]; then
+        echo ""
+        return 0
+    fi
+    case "$raw" in
+        /* | ./* | ../* | *.json)
+            if [ ! -f "$raw" ]; then
+                echo "[build-custom-image] WARNING: ORION_IMAGE_FANOUT file not found: $raw" >&2
+                echo ""
+                return 0
+            fi
+            cat "$raw"
+            ;;
+        *)
+            printf '%s\n' "$raw"
+            ;;
+    esac
+}
+
+legacy_orion_image_fanout_json() {
+    if [ -z "${RUSTFS_ENDPOINT:-}" ] || [ -z "${RUSTFS_ACCESS_KEY:-}" ] \
+        || [ -z "${RUSTFS_SECRET_KEY:-}" ] || [ -z "${RUSTFS_BUCKET:-}" ]; then
+        echo ""
+        return 0
+    fi
+    jq -n \
+        --arg name "legacy" \
+        --arg register_url "${ORION_IMAGE_REGISTER_URL:-}" \
+        --arg token "${ORION_IMAGE_REGISTER_TOKEN:-}" \
+        --arg bootstrap_secret "${MEGA_INIT_BOOTSTRAP_SECRET:-}" \
+        --arg rustfs_endpoint "$RUSTFS_ENDPOINT" \
+        --arg rustfs_access_key "$RUSTFS_ACCESS_KEY" \
+        --arg rustfs_secret_key "$RUSTFS_SECRET_KEY" \
+        --arg rustfs_bucket "$RUSTFS_BUCKET" \
+        --arg rustfs_region "${RUSTFS_REGION:-us-east-1}" \
+        '[{
+          name: $name,
+          register_url: $register_url,
+          token: $token,
+          bootstrap_secret: $bootstrap_secret,
+          rustfs_endpoint: $rustfs_endpoint,
+          rustfs_access_key: $rustfs_access_key,
+          rustfs_secret_key: $rustfs_secret_key,
+          rustfs_bucket: $rustfs_bucket,
+          rustfs_region: $rustfs_region
+        }]'
+}
+
+# Derive POST /api/v1/bots/bootstrap-orion-image from register_url when needed.
+orion_image_bootstrap_url_from_register() {
+    local register_url="$1"
+    local explicit="$2"
+    if [ -n "$explicit" ]; then
+        printf '%s\n' "$explicit"
+        return 0
+    fi
+    if [[ "$register_url" == *"/api/v1/orion/images" ]]; then
+        printf '%s\n' "${register_url%/api/v1/orion/images}/api/v1/bots/bootstrap-orion-image"
+        return 0
+    fi
+    if [[ "$register_url" == *"/api/v1/orion/images/" ]]; then
+        printf '%s\n' "${register_url%/api/v1/orion/images/}/api/v1/bots/bootstrap-orion-image"
+        return 0
+    fi
+    echo ""
+}
+
+# Resolve register Bearer token: static token, else mint via bootstrap-orion-image.
+resolve_orion_image_register_token() {
+    local name="$1"
+    local target_json="$2"
+    local register_url="$3"
+
+    local token bootstrap_secret bootstrap_url resp
+    token=$(jq -r '.token // empty' <<<"$target_json")
+    if [ -n "$token" ]; then
+        printf '%s\n' "$token"
+        return 0
+    fi
+
+    bootstrap_secret=$(jq -r '.bootstrap_secret // empty' <<<"$target_json")
+    if [ -z "$bootstrap_secret" ]; then
+        bootstrap_secret="${MEGA_INIT_BOOTSTRAP_SECRET:-}"
+    fi
+    bootstrap_url=$(orion_image_bootstrap_url_from_register \
+        "$register_url" \
+        "$(jq -r '.bootstrap_url // empty' <<<"$target_json")")
+
+    if [ -z "$bootstrap_secret" ] || [ -z "$bootstrap_url" ]; then
+        echo ""
+        return 0
+    fi
+
+    echo "[build-custom-image] [$name] Bootstrapping orion-image-publisher via $bootstrap_url ..." >&2
+    resp=$(curl -fsS -X POST "$bootstrap_url" \
+        -H "X-Mega-Init-Secret: ${bootstrap_secret}" \
+        -H "Content-Type: application/json" \
+        -d '{}' 2>/dev/null) || {
+        echo "[build-custom-image] WARNING: [$name] bootstrap-orion-image failed" >&2
+        echo ""
+        return 0
+    }
+
+    token=$(jq -r '.data.token // empty' <<<"$resp")
+    if [ -z "$token" ]; then
+        echo "[build-custom-image] WARNING: [$name] bootstrap returned no token: $resp" >&2
+        echo ""
+        return 0
+    fi
+    echo "[build-custom-image] [$name] Got bot token for bot_name=$(jq -r '.data.bot_name // empty' <<<"$resp")" >&2
+    printf '%s\n' "$token"
+}
+
+upload_orion_image_to_target() {
     local image_file="$1"
     local digest_hex="$2"
     local info_file="$3"
+    local target_json="$4"
 
-    if [ -z "${RUSTFS_ENDPOINT:-}" ] || [ -z "${RUSTFS_ACCESS_KEY:-}" ] \
-        || [ -z "${RUSTFS_SECRET_KEY:-}" ] || [ -z "${RUSTFS_BUCKET:-}" ]; then
-        echo "[build-custom-image] RustFS env incomplete; skipping upload/register"
-        echo "[build-custom-image]   set RUSTFS_ENDPOINT RUSTFS_ACCESS_KEY RUSTFS_SECRET_KEY RUSTFS_BUCKET"
-        return 0
-    fi
-    if ! command -v aws >/dev/null 2>&1; then
-        echo "[build-custom-image] WARNING: aws CLI not found; skipping RustFS upload" >&2
-        return 0
+    local name endpoint access_key secret_key bucket region
+    name=$(jq -r '.name // "unnamed"' <<<"$target_json")
+    endpoint=$(jq -r '.rustfs_endpoint // empty' <<<"$target_json")
+    access_key=$(jq -r '.rustfs_access_key // empty' <<<"$target_json")
+    secret_key=$(jq -r '.rustfs_secret_key // empty' <<<"$target_json")
+    bucket=$(jq -r '.rustfs_bucket // empty' <<<"$target_json")
+    region=$(jq -r '.rustfs_region // "us-east-1"' <<<"$target_json")
+
+    if [ -z "$endpoint" ] || [ -z "$access_key" ] || [ -z "$secret_key" ] || [ -z "$bucket" ]; then
+        echo "[build-custom-image] WARNING: target '$name' missing RustFS fields; skipping" >&2
+        return 1
     fi
 
     local object_key="${digest_hex}/${IMAGE_NAME}.qcow2"
     local info_key="${digest_hex}/image-info.json"
-    local s3_qcow2="s3://${RUSTFS_BUCKET}/orion-images/${object_key}"
-    local s3_info="s3://${RUSTFS_BUCKET}/orion-images/${info_key}"
+    local s3_qcow2="s3://${bucket}/orion-images/${object_key}"
+    local s3_info="s3://${bucket}/orion-images/${info_key}"
 
-    echo "[build-custom-image] Uploading qcow2 to ${s3_qcow2} ..."
-    AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
-    AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
-    AWS_DEFAULT_REGION="${RUSTFS_REGION:-us-east-1}" \
-    aws --endpoint-url "$RUSTFS_ENDPOINT" s3 cp \
-        --only-show-errors \
-        "$image_file" "$s3_qcow2"
-
-    if [ -f "$info_file" ]; then
-        echo "[build-custom-image] Uploading sidecar to ${s3_info} ..."
-        AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
-        AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
-        AWS_DEFAULT_REGION="${RUSTFS_REGION:-us-east-1}" \
-        aws --endpoint-url "$RUSTFS_ENDPOINT" s3 cp \
+    echo "[build-custom-image] [$name] Uploading qcow2 to ${s3_qcow2} ..."
+    if ! AWS_ACCESS_KEY_ID="$access_key" \
+        AWS_SECRET_ACCESS_KEY="$secret_key" \
+        AWS_DEFAULT_REGION="$region" \
+        aws --endpoint-url "$endpoint" s3 cp \
             --only-show-errors \
-            "$info_file" "$s3_info"
+            "$image_file" "$s3_qcow2"; then
+        echo "[build-custom-image] WARNING: [$name] qcow2 upload failed" >&2
+        return 1
     fi
 
-    if [ -z "${ORION_IMAGE_REGISTER_URL:-}" ] || [ -z "${ORION_IMAGE_REGISTER_TOKEN:-}" ]; then
-        echo "[build-custom-image] ORION_IMAGE_REGISTER_URL/TOKEN unset; upload done, catalog not registered"
+    if [ -f "$info_file" ]; then
+        echo "[build-custom-image] [$name] Uploading sidecar to ${s3_info} ..."
+        if ! AWS_ACCESS_KEY_ID="$access_key" \
+            AWS_SECRET_ACCESS_KEY="$secret_key" \
+            AWS_DEFAULT_REGION="$region" \
+            aws --endpoint-url "$endpoint" s3 cp \
+                --only-show-errors \
+                "$info_file" "$s3_info"; then
+            echo "[build-custom-image] WARNING: [$name] sidecar upload failed" >&2
+            return 1
+        fi
+    fi
+
+    local register_url token
+    register_url=$(jq -r '.register_url // empty' <<<"$target_json")
+    if [ -z "$register_url" ]; then
+        echo "[build-custom-image] [$name] register_url unset; upload done, catalog not registered"
+        return 0
+    fi
+
+    token=$(resolve_orion_image_register_token "$name" "$target_json" "$register_url")
+    if [ -z "$token" ]; then
+        echo "[build-custom-image] [$name] no token (set token, or bootstrap_secret / MEGA_INIT_BOOTSTRAP_SECRET); upload done, catalog not registered"
         return 0
     fi
 
     local size_bytes built_at rust_ver buck2_ver python_ver kernel_ver
-    size_bytes=$(stat -c%s "$image_file")
+    size_bytes=$(file_size_bytes "$image_file")
     built_at=$(jq -r '.built_at // empty' "$info_file" 2>/dev/null || true)
     rust_ver=$(jq -r '.rust // empty' "$info_file" 2>/dev/null || true)
     buck2_ver=$(jq -r '.buck2 // empty' "$info_file" 2>/dev/null || true)
@@ -1114,16 +1320,71 @@ upload_and_register_orion_image() {
           size_bytes: $size_bytes
         }')
 
-    echo "[build-custom-image] Registering catalog at $ORION_IMAGE_REGISTER_URL ..."
-    if ! curl -fsS -X POST "$ORION_IMAGE_REGISTER_URL" \
-        -H "Authorization: Bearer ${ORION_IMAGE_REGISTER_TOKEN}" \
+    echo "[build-custom-image] [$name] Registering catalog at $register_url ..."
+    if ! curl -fsS -X POST "$register_url" \
+        -H "Authorization: Bearer ${token}" \
         -H "Content-Type: application/json" \
         -d "$body"; then
-        echo "[build-custom-image] WARNING: catalog register failed (objects may still be in RustFS)" >&2
-        return 0
+        echo "[build-custom-image] WARNING: [$name] catalog register failed (objects may still be in RustFS)" >&2
+        return 1
     fi
     echo ""
-    echo "[build-custom-image] Catalog register OK"
+    echo "[build-custom-image] [$name] Catalog register OK"
+    return 0
+}
+
+upload_and_register_orion_image() {
+    local image_file="$1"
+    local digest_hex="$2"
+    local info_file="$3"
+
+    if [ -z "${ORION_IMAGE_FANOUT:-}" ] \
+        && { [ -z "${RUSTFS_ENDPOINT:-}" ] || [ -z "${RUSTFS_ACCESS_KEY:-}" ] \
+            || [ -z "${RUSTFS_SECRET_KEY:-}" ] || [ -z "${RUSTFS_BUCKET:-}" ]; }; then
+        echo "[build-custom-image] No ORION_IMAGE_FANOUT or RUSTFS_* targets; skipping upload/register"
+        echo "[build-custom-image]   set ORION_IMAGE_FANOUT=...json or RUSTFS_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET"
+        return 0
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[build-custom-image] WARNING: jq not found; skipping RustFS upload/register" >&2
+        return 0
+    fi
+    if ! command -v aws >/dev/null 2>&1; then
+        echo "[build-custom-image] WARNING: aws CLI not found; skipping RustFS upload" >&2
+        return 0
+    fi
+
+    local fanout_json
+    fanout_json=$(resolve_orion_image_fanout_json)
+    if [ -z "$fanout_json" ]; then
+        fanout_json=$(legacy_orion_image_fanout_json)
+    fi
+    if [ -z "$fanout_json" ]; then
+        echo "[build-custom-image] No ORION_IMAGE_FANOUT or RUSTFS_* targets; skipping upload/register"
+        return 0
+    fi
+
+    if ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$fanout_json"; then
+        echo "[build-custom-image] WARNING: ORION_IMAGE_FANOUT must be a JSON array; skipping" >&2
+        return 0
+    fi
+
+    local count i target_json
+    count=$(jq 'length' <<<"$fanout_json")
+    if [ "$count" -eq 0 ]; then
+        echo "[build-custom-image] ORION_IMAGE_FANOUT is empty; skipping upload/register"
+        return 0
+    fi
+
+    echo "[build-custom-image] Fan-out to $count target(s) ..."
+    i=0
+    while [ "$i" -lt "$count" ]; do
+        target_json=$(jq -c --argjson i "$i" '.[$i]' <<<"$fanout_json")
+        upload_orion_image_to_target "$image_file" "$digest_hex" "$info_file" "$target_json" \
+            || true
+        i=$((i + 1))
+    done
 }
 
 PUBLISH_SOURCE="$PUBLISHED_IMAGE"

@@ -1383,7 +1383,7 @@ dependencies = [
  "chrono",
  "common",
  "futures",
- "git-internal",
+ "git-internal 0.9.0",
  "hex",
  "io-orbit",
  "jupiter",
@@ -1595,7 +1595,7 @@ dependencies = [
  "config",
  "directories",
  "envsubst",
- "git-internal",
+ "git-internal 0.9.0",
  "idgenerator",
  "pgp 0.20.0",
  "redis",
@@ -3249,6 +3249,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-internal"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d265f273ae8635bbcfd3634d0a8705a1970cd734d9eb5b9ff0eaaac14f4a067"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "axum",
+ "blake3",
+ "bstr",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "colored",
+ "crc32fast",
+ "dashmap 6.2.1",
+ "diffs",
+ "encoding_rs",
+ "flate2",
+ "futures",
+ "futures-util",
+ "hex",
+ "libc",
+ "lru-mem",
+ "memchr",
+ "num_cpus",
+ "path-absolutize",
+ "rayon",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+ "thiserror 2.0.20",
+ "threadpool",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zstd-sys",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4182,7 +4228,7 @@ dependencies = [
  "chrono",
  "common",
  "futures",
- "git-internal",
+ "git-internal 0.9.0",
  "hex",
  "hmac 0.13.0",
  "idgenerator",
@@ -4904,7 +4950,7 @@ dependencies = [
  "common",
  "ctrlc",
  "futures",
- "git-internal",
+ "git-internal 0.9.0",
  "http",
  "io-orbit",
  "jemallocator",
@@ -7609,7 +7655,7 @@ dependencies = [
  "dashmap 6.2.1",
  "env_logger",
  "futures",
- "git-internal",
+ "git-internal 0.8.7",
  "hex",
  "libc",
  "libfuse-fs",
