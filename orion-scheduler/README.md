@@ -39,8 +39,6 @@ flowchart LR
   "max_vms": 8,
   "retain_antares_mounts": false,
   "default_image": {
-    "image_path": "~/.local/share/qlean/images/debian-13-buck2/debian-13-buck2.qcow2",
-    "image_digest": "sha256:753c28888c9d30fe4baef55c1d1dfa9a39431595eca940b7ad85d78d84f3d7a5",
     "image_disk_gb": 50,
     "image_cpus": 8,
     "image_memory_mb": 16000
@@ -99,7 +97,7 @@ GHA 等需同步等待的调用方可传 `"sync": true` 保留旧行为（阻塞
 
 ### Mega UI / mono 代理
 
-Admin 用户通过 Mega UI Orion Client 页调用 mono `POST /api/v1/orion/runners`（空 body）；mono 从 `build.runner_connect_domain` 拼接 `git.` / `orion.` 子域名推导 env URL 后转发至 scheduler。scheduler URL 仅配置在 mono 服务端（`build.orion_scheduler_url`），浏览器不直连 scheduler。
+Admin 用户通过 Mega UI Orion Client 页调用 mono `POST /api/v1/orion/runners`（可选 `image_id`；省略则最新 catalog）；mono 从 `build.runner_connect_domain` 拼接 `git.` / `orion.` 子域名推导 env URL，并对 catalog 镜像签发 RustFS URL 后转发至 scheduler。scheduler URL 仅配置在 mono 服务端（`build.orion_scheduler_url`），浏览器不直连 scheduler。
 
 ---
 
@@ -126,10 +124,11 @@ curl -X POST http://localhost:8080/webhook \
   -d '{
     "server_ws": "wss://orion.gitmega.com/ws",
     "scorpio_base_url": "https://git.gitmega.com",
-    "scorpio_lfs_url": "https://git.gitmega.com"
+    "scorpio_lfs_url": "https://git.gitmega.com",
+    "image_url": "https://rustfs.example/orion-images/.../debian-13-buck2.qcow2",
+    "image_digest": "sha256:..."
   }'
 ```
-
 | 字段                | 类型     | 必填   | 说明                                                       |
 | ----------------- | ------ | ---- | -------------------------------------------------------- |
 | `server_ws`       | string | 是    | Orion WebSocket URL，写入 VM 内 `.env` 的 `SERVER_WS`          |
@@ -139,15 +138,15 @@ curl -X POST http://localhost:8080/webhook \
 | `action`          | string | 否    | GitHub Actions 事件类型，仅作日志记录                               |
 | `sync`            | bool   | 否    | 为 `true` 时同步阻塞至部署完成（默认 `false`，立即 202 返回）              |
 | `replace`         | bool   | 否    | Running 状态下为 `true` 时强制重建（默认幂等返回已有实例）                 |
-| `image_path`      | string | 否    | 本地 qcow2 镜像路径；未指定时使用 `default_image.image_path`           |
-| `image_url`       | string | 否    | 远程 HTTPS URL                                             |
+| `image_path`      | string | 条件必填 | 本地 qcow2 镜像路径（ops curl）；与 `image_url` 互斥；**不再有静默本地 default** |
+| `image_url`       | string | 条件必填 | 远程 HTTPS URL（catalog / RustFS 签名 URL）；与 `image_path` 二选一必填 |
 | `image_digest`    | string | 条件必填 | 镜像 SHA256/SHA512 校验和，提供 `image_path` 或 `image_url` 时必须指定 |
 | `image_disk_gb`   | u32    | 否    | 虚拟机磁盘大小（GB）；未指定时使用 `default_image.image_disk_gb`         |
 | `image_cpus`      | u32    | 否    | 虚拟 CPU 数量；未指定时使用 `default_image.image_cpus`               |
 | `image_memory_mb` | u32    | 否    | 内存大小（MB）；未指定时使用 `default_image.image_memory_mb`           |
 | `retain_antares_mounts` | bool | 否 | 写入 guest `.env` 的 `ORION_RETAIN_ANTARES_MOUNTS`（`true`→`1`，`false`→`0`）；省略则保留 `.env.prod` 原值 |
 
-> `image_path` 与 `image_url` 互斥，不可同时指定。提供镜像参数时 `image_digest` 必须提供（格式：`sha256:...` 或 `sha512:...`）。未传任何 `image_*` 字段时，scheduler 使用 `target_config.json` 中的 `default_image` 块。
+> `image_path` 与 `image_url` 互斥，必须提供其一（否则 400）。提供镜像参数时 `image_digest` 必须提供（格式：`sha256:...` 或 `sha512:...`）。`default_image` 仅提供 disk/cpu/memory 默认值，不再填充本地 qcow2 路径。
 
 ### 镜像 catalog（RustFS + mono）
 
@@ -192,7 +191,7 @@ curl -X POST http://localhost:8080/webhook \
 
 对象键：`orion-images/{sha256_hex}/debian-13-buck2.qcow2` + `image-info.json`。
 
-Campsite POC：镜像列表展示 rust / python / buck2 / kernel；Start Runner 可选 catalog 项（`POST /api/v1/orion/runners` 的 `image_id`）。mono 解析为预签名 `image_url` + `image_digest` 再调 scheduler `/webhook`。
+Campsite POC：镜像列表展示 rust / python / buck2 / kernel；Start Runner 可选 catalog 项（`image_id`）或 **Latest（省略则取 catalog 最新）**。mono 解析为预签名 `image_url` + `image_digest` 再调 scheduler `/webhook`。
 
 ### GHA / 外部 webhook 迁移
 
@@ -208,11 +207,13 @@ Campsite POC：镜像列表展示 rust / python / buck2 / kernel；Start Runner 
       -d '{
         "server_ws": "wss://orion.example.com/ws",
         "scorpio_base_url": "https://git.example.com",
-        "scorpio_lfs_url": "https://git.example.com"
+        "scorpio_lfs_url": "https://git.example.com",
+        "image_url": "https://rustfs.example/orion-images/.../debian-13-buck2.qcow2",
+        "image_digest": "sha256:..."
       }'
 ```
 
-Mega UI 通过 mono 代理启动 runner 时不传 env URL；mono 从基础域名 `runner_connect_domain` 拼接 `git.` / `orion.` 子域名，无需传 `image_*`（由 scheduler `default_image` 填充）。
+Mega UI 通过 mono 代理启动 runner 时不传 env URL；mono 从基础域名 `runner_connect_domain` 拼接 `git.` / `orion.` 子域名。镜像：传 `image_id` 用指定 catalog 项，省略则取 catalog 最新一条（按 `created_at`），经 RustFS 签名 URL 转发给 scheduler。
 
 ---
 
@@ -286,17 +287,17 @@ sudo bash scripts/build-custom-image.sh
 | `ssh_public_key_path` | string | 无默认值（必填）                   | SSH 公钥路径                            |
 | `max_vms`             | u32    | 无（不限制）                     | 同时跟踪的 domain/VM 上限；超出新 domain 返回 503 |
 | `retain_antares_mounts` | bool | 无（不写入）                   | webhook 省略时的默认；写入 guest `ORION_RETAIN_ANTARES_MOUNTS` |
-| `default_image`       | object | 见模板                          | 默认 VM 镜像参数；webhook 未传 `image_*` 时使用 |
+| `default_image`       | object | 见模板                          | 默认 VM **规格**（disk/cpu/memory）；不再提供默认本地镜像路径 |
 
 ### `default_image`
 
 | 字段                 | 类型     | 说明                                               |
 | ------------------ | ------ | ------------------------------------------------ |
-| `image_path`       | string | 本地 qcow2 镜像路径                                    |
-| `image_digest`     | string | 镜像 SHA256 校验和                                    |
 | `image_disk_gb`    | u32    | 磁盘大小（GB）                                         |
 | `image_cpus`       | u32    | vCPU 数量                                          |
 | `image_memory_mb`  | u32    | 内存（MB）                                           |
+
+> 旧配置中的 `image_path` / `image_digest` 会被忽略。Start Runner 镜像一律由 mono catalog（RustFS 签名 URL）或 webhook 显式 `image_url`/`image_path` 提供。
 
 环境 URL（`server_ws`、`scorpio_base_url`、`scorpio_lfs_url`）由 webhook 请求体传入，不再通过 `targets` 查表。
 

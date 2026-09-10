@@ -267,7 +267,19 @@ sudo -E bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
 
 脚本对每个目标：`POST …/bots/bootstrap-orion-image`（`X-Mega-Init-Secret`）→ 用返回的 `bot_` token 调 `POST …/orion/images`。也可在目标里设静态 `token` 跳过 bootstrap。
 
-单环境兼容：
+单环境兼容（优先 `scripts/.env`，已 export 的变量优先；`sudo -E` 可覆盖）：
+
+```bash
+cp ~/mega/orion-scheduler/scripts/.env.example ~/mega/orion-scheduler/scripts/.env
+# 填入 RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY，以及 MEGA_INIT_BOOTSTRAP_SECRET
+# 或 ORION_IMAGE_REGISTER_TOKEN
+
+sudo bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
+# 本地仍发布到 ~/.local/share/qlean/images/
+# 若 .env 密钥齐全：上传 orion-images/{sha256}/… 并 POST 注册 catalog
+```
+
+也可继续用环境变量（会写回 `scripts/.env`）：
 
 ```bash
 export RUSTFS_ENDPOINT=https://rustfs.example.com
@@ -279,9 +291,9 @@ export MEGA_INIT_BOOTSTRAP_SECRET=...   # 推荐：自动 bootstrap
 # 或: export ORION_IMAGE_REGISTER_TOKEN=bot_...
 
 sudo -E bash ~/mega/orion-scheduler/scripts/build-custom-image.sh
-# 本地仍发布到 ~/.local/share/qlean/images/
-# 若 env 齐全：上传 orion-images/{sha256}/… 并 POST 注册 catalog
 ```
+
+构建缓存：Rust tarball 在 `/var/cache/orion-image/rust/`（按版本分文件）；compact 后的 qcow2 在 `/var/cache/orion-image/built/<recipe>/`。切回以前的 `RUST_VERSION` 会复用对应镜像，不必重新 chroot。强制重建：`FORCE_REBUILD=1 sudo bash scripts/build-custom-image.sh`。
 
 对象布局：
 
@@ -291,6 +303,15 @@ orion-images/{sha256_hex}/image-info.json
 ```
 
 UI（Campsite POC）通过 `GET /api/v1/orion/images` 列出工具链版本；Start Runner 传 `image_id`，mono 签发预签名 URL 给 scheduler。
+
+若 mono 对内用集群内 RustFS（`*.svc.cluster.local`），而 orion-scheduler 跑在集群外，须在 mono 的 `[object_storage.s3]` 配置公网签发地址，例如：
+
+```toml
+endpoint_url = "http://rustfs.mega-dev.svc.cluster.local:9000"
+presign_endpoint_url = "https://rustfs.xuanwu.openatom.cn"
+```
+
+`presign_endpoint_url` 只影响预签名 URL 的 Host（签名包含 Host，不能事后改写）；对内 PUT/GET 仍走 `endpoint_url`。留空则签发仍用 `endpoint_url`。
 
 未设 `ORION_IMAGE_FANOUT` / RustFS / register env 时脚本只做本地发布（与以前相同）。
 
@@ -333,5 +354,5 @@ bash orion-scheduler/scripts/build-custom-image.sh
 | Guest 磁盘打满 / worker Lost | VM 内 `df -h /`；清 `/data/scorpio/antares/{upper,cl}` 或 `systemctl restart orion-runner`；新盘建议 `image_disk_gb: 50` |
 | 重启后状态丢了 | 内存 map；磁盘 qemu 靠启动 reap；重新 POST webhook |
 | 镜像 catalog 为空 | 构建时设 `ORION_IMAGE_FANOUT` 或 RustFS + `ORION_IMAGE_REGISTER_URL` + `MEGA_INIT_BOOTSTRAP_SECRET`（或静态 token）；查 mono `GET /api/v1/orion/images`；bootstrap 失败查 secret 是否与 mono 一致 |
-| Start Runner 选镜像失败 | mono 对象存储需支持预签名（RustFS/S3）；本地 backend 无 signed URL |
+| Start Runner 选镜像失败 | mono 对象存储需支持预签名（RustFS/S3）；本地 backend 无 signed URL；集群外 scheduler 若拉不动 `*.svc.cluster.local`，给 mono 配 `presign_endpoint_url` 公网 RustFS |
 | 进 VM 调试 | [SSH 进入 VM](#ssh-进入-vm) |

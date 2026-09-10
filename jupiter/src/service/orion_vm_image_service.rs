@@ -42,6 +42,11 @@ impl OrionVmImageService {
         self.st.list_all().await
     }
 
+    /// Newest catalog row by `created_at` (same order as [`Self::list`]).
+    pub async fn latest(&self) -> Result<Option<orion_vm_image::Model>, MegaError> {
+        Ok(self.list().await?.into_iter().next())
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<orion_vm_image::Model>, MegaError> {
         self.st.find_by_id(id).await
     }

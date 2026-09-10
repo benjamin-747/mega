@@ -86,6 +86,7 @@ const OrionClientPage: PageWithLayout<any> = () => {
   const [terminalDomain, setTerminalDomain] = React.useState<string | null>(null)
   const [copyFeedback, setCopyFeedback] = React.useState(false)
   const [selectedImageId, setSelectedImageId] = React.useState<string>('')
+  const didAutoSelectImageRef = React.useRef(false)
   const logPanelRef = React.useRef<HTMLDivElement>(null)
   const terminalPanelRef = React.useRef<HTMLDivElement>(null)
   const logsScrollRef = React.useRef<HTMLDivElement>(null)
@@ -114,6 +115,18 @@ const OrionClientPage: PageWithLayout<any> = () => {
   const { logs: runnerLogs, status: runnerLogsStatus, error: runnerLogsError } = useRunnerLogsSSE(activeLogKey)
 
   runnerLogsRef.current = runnerLogs
+
+  // On first catalog load, pin the select to the newest image so the UI matches
+  // what will start. Operators can still choose "Latest (catalog)" (empty) so
+  // mono re-resolves newest on each Start.
+  React.useEffect(() => {
+    if (didAutoSelectImageRef.current) return
+    if (isLoadingImages || orionImages.length === 0) return
+    didAutoSelectImageRef.current = true
+    if (!selectedImageId) {
+      setSelectedImageId(orionImages[0].id)
+    }
+  }, [isLoadingImages, orionImages, selectedImageId])
 
   const { mutate, isPending, error } = usePostOrionClientsInfo()
   const [clientsPage, setClientsPage] = React.useState<PostOrionClientsInfoData | null>(null)
@@ -429,9 +442,9 @@ const OrionClientPage: PageWithLayout<any> = () => {
                       className='max-w-xs rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-900'
                       value={selectedImageId}
                       onChange={(e) => setSelectedImageId(e.target.value)}
-                      disabled={isStartingRunner || isLoadingImages}
+                      disabled={isStartingRunner || isLoadingImages || orionImages.length === 0}
                     >
-                      <option value=''>Default (scheduler config)</option>
+                      <option value=''>Latest (catalog)</option>
                       {orionImages.map((img) => (
                         <option key={img.id} value={img.id}>
                           {[
@@ -450,7 +463,12 @@ const OrionClientPage: PageWithLayout<any> = () => {
                   <Button
                     variant='primary'
                     onClick={() => handleStartRunner(true)}
-                    disabled={isStartingRunner || activePhase === 'provisioning'}
+                    disabled={
+                      isStartingRunner ||
+                      activePhase === 'provisioning' ||
+                      isLoadingImages ||
+                      orionImages.length === 0
+                    }
                   >
                     {isStartingRunner ? 'Starting…' : 'Start Runner'}
                   </Button>
@@ -550,8 +568,12 @@ const OrionClientPage: PageWithLayout<any> = () => {
                 ) : null}
                 {runnerStatus?.image_name || runnerStatus?.image_digest ? (
                   <UIText size='text-sm' color='text-muted'>
-                    Image: {runnerStatus.image_name ?? 'unknown'}
-                    {runnerStatus.image_digest
+                    Image:{' '}
+                    {runnerStatus.image_name ||
+                      (runnerStatus.image_digest
+                        ? `sha256:${runnerStatus.image_digest.replace(/^sha256:/, '').slice(0, 12)}…`
+                        : 'unknown')}
+                    {runnerStatus.image_name && runnerStatus.image_digest
                       ? ` (${runnerStatus.image_digest.replace(/^sha256:/, '').slice(0, 12)})`
                       : ''}
                   </UIText>
