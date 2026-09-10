@@ -9,6 +9,7 @@ import type { OrionVmImage } from '@/hooks/OrionClient/useGetOrionImages'
 function shortDigest(digest?: string | null) {
   if (!digest) return '—'
   const hex = digest.replace(/^sha256:/, '').replace(/^sha512:/, '')
+
   return hex.length > 12 ? `${hex.slice(0, 12)}…` : hex
 }
 
@@ -55,13 +56,7 @@ export function DeleteOrionImageDialog({ image, open, onOpenChange }: DeleteOrio
           <Button variant='flat' disabled={isPending} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            autoFocus
-            variant='destructive'
-            disabled={!image}
-            loading={isPending}
-            onClick={onDelete}
-          >
+          <Button autoFocus variant='destructive' disabled={!image} loading={isPending} onClick={onDelete}>
             Delete
           </Button>
         </Dialog.TrailingActions>

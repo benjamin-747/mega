@@ -10,14 +10,17 @@ import type { OrionVmImage } from '@/hooks/OrionClient/useGetOrionImages'
 function shortDigest(digest?: string | null) {
   if (!digest) return '—'
   const hex = digest.replace(/^sha256:/, '').replace(/^sha512:/, '')
+
   return hex.length > 12 ? `${hex.slice(0, 12)}…` : hex
 }
 
 function formatBytes(n?: number | null) {
   if (n == null || n <= 0) return '—'
   const gb = n / (1024 * 1024 * 1024)
+
   if (gb >= 1) return `${gb.toFixed(1)} GiB`
   const mb = n / (1024 * 1024)
+
   return `${mb.toFixed(0)} MiB`
 }
 
@@ -58,7 +61,7 @@ export function OrionImagesTable({ images, isLoading, error }: Props) {
     <>
       <div className='overflow-x-auto rounded-md border border-gray-200 dark:border-gray-700'>
         <table className='min-w-full text-left text-sm'>
-          <thead className='bg-gray-50 text-xs uppercase text-gray-500 dark:bg-gray-900 dark:text-gray-400'>
+          <thead className='bg-gray-50 text-xs text-gray-500 uppercase dark:bg-gray-900 dark:text-gray-400'>
             <tr>
               <th className='px-3 py-2 font-medium'>Built</th>
               <th className='px-3 py-2 font-medium'>Rust</th>
@@ -73,7 +76,7 @@ export function OrionImagesTable({ images, isLoading, error }: Props) {
           <tbody>
             {images.map((img) => (
               <tr key={img.id} className='border-t border-gray-100 dark:border-gray-800'>
-                <td className='whitespace-nowrap px-3 py-2'>{img.built_at || '—'}</td>
+                <td className='px-3 py-2 whitespace-nowrap'>{img.built_at || '—'}</td>
                 <td className='px-3 py-2'>{img.rust || '—'}</td>
                 <td className='px-3 py-2'>{img.python || '—'}</td>
                 <td className='px-3 py-2'>{img.buck2 || '—'}</td>

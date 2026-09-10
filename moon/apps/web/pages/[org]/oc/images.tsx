@@ -6,8 +6,8 @@ import Head from 'next/head'
 import { Button, UIText } from '@gitmono/ui'
 
 import { AppLayout } from '@/components/Layout/AppLayout'
-import { OrionClientPageWrapper } from '@/components/OrionClient/PageWrapper'
 import { OrionImagesTable } from '@/components/OrionClient/OrionImagesTable'
+import { OrionClientPageWrapper } from '@/components/OrionClient/PageWrapper'
 import { UploadOrionImageDialog } from '@/components/OrionClient/UploadOrionImageDialog'
 import AuthAppProviders from '@/components/Providers/AuthAppProviders'
 import { useAdminCheck } from '@/hooks/admin/useAdminCheck'
@@ -17,11 +17,7 @@ import { PageWithLayout } from '@/utils/types'
 const OrionImagesPage: PageWithLayout<any> = () => {
   const { data: adminCheck } = useAdminCheck()
   const isAdmin = adminCheck?.data?.is_admin || false
-  const {
-    data: orionImages = [],
-    isLoading: isLoadingImages,
-    error: orionImagesError
-  } = useGetOrionImages(isAdmin)
+  const { data: orionImages = [], isLoading: isLoadingImages, error: orionImagesError } = useGetOrionImages(isAdmin)
   const [uploadOpen, setUploadOpen] = useState(false)
 
   return (

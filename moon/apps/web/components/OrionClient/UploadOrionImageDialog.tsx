@@ -21,13 +21,7 @@ type ImageInfoSidecar = {
   kernel?: string
 }
 
-type UploadPhase =
-  | 'idle'
-  | 'hashing'
-  | 'presigning'
-  | 'uploading_image'
-  | 'uploading_info'
-  | 'registering'
+type UploadPhase = 'idle' | 'hashing' | 'presigning' | 'uploading_image' | 'uploading_info' | 'registering'
 
 interface UploadOrionImageDialogProps {
   open: boolean
@@ -36,11 +30,13 @@ interface UploadOrionImageDialogProps {
 
 function defaultImageName(fileName: string) {
   const base = fileName.replace(/\.qcow2$/i, '').trim()
+
   return base || 'debian-13-buck2'
 }
 
 function phaseLabel(phase: UploadPhase, progress: number): string {
   const pct = Math.round(progress * 100)
+
   switch (phase) {
     case 'hashing':
       return `Hashing image… ${pct}%`
@@ -91,6 +87,7 @@ export function UploadOrionImageDialog({ open, onOpenChange }: UploadOrionImageD
       const resolvedName = imageName.trim() || defaultImageName(qcow2File.name)
 
       let infoMeta: ImageInfoSidecar = {}
+
       if (infoFile) {
         try {
           infoMeta = JSON.parse(await infoFile.text()) as ImageInfoSidecar
@@ -109,22 +106,16 @@ export function UploadOrionImageDialog({ open, onOpenChange }: UploadOrionImageD
 
       setPhase('uploading_image')
       setProgress(0)
-      await putWithProgress(
-        resolveMonoUploadUrl(urls.qcow2_put_url, MONO_API_URL),
-        qcow2File,
-        setProgress,
-        { withCredentials: true }
-      )
+      await putWithProgress(resolveMonoUploadUrl(urls.qcow2_put_url, MONO_API_URL), qcow2File, setProgress, {
+        withCredentials: true
+      })
 
       if (infoFile && urls.info_put_url) {
         setPhase('uploading_info')
         setProgress(0)
-        await putWithProgress(
-          resolveMonoUploadUrl(urls.info_put_url, MONO_API_URL),
-          infoFile,
-          setProgress,
-          { withCredentials: true }
-        )
+        await putWithProgress(resolveMonoUploadUrl(urls.info_put_url, MONO_API_URL), infoFile, setProgress, {
+          withCredentials: true
+        })
       }
 
       setPhase('registering')
@@ -147,6 +138,7 @@ export function UploadOrionImageDialog({ open, onOpenChange }: UploadOrionImageD
       onOpenChange(false)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Upload failed'
+
       toast.error(message)
       setPhase('idle')
       setProgress(0)
@@ -166,8 +158,8 @@ export function UploadOrionImageDialog({ open, onOpenChange }: UploadOrionImageD
       <Dialog.Header>
         <Dialog.Title>Upload image</Dialog.Title>
         <Dialog.Description>
-          Upload a qcow2 to object storage and register it in the Orion catalog. Optionally include
-          image-info.json for toolchain metadata.
+          Upload a qcow2 to object storage and register it in the Orion catalog. Optionally include image-info.json for
+          toolchain metadata.
         </Dialog.Description>
       </Dialog.Header>
 
@@ -182,6 +174,7 @@ export function UploadOrionImageDialog({ open, onOpenChange }: UploadOrionImageD
             disabled={busy}
             onChange={(e) => {
               const file = e.target.files?.[0] ?? null
+
               setQcow2File(file)
               if (file && !imageName.trim()) {
                 setImageName(defaultImageName(file.name))

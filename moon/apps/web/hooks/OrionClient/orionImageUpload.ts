@@ -1,11 +1,9 @@
 import { createSHA256 } from 'hash-wasm'
 
 /** Stream SHA-256 of a File/Blob without loading it entirely into memory. */
-export async function sha256HexOfFile(
-  file: Blob,
-  onProgress?: (ratio: number) => void
-): Promise<string> {
+export async function sha256HexOfFile(file: Blob, onProgress?: (ratio: number) => void): Promise<string> {
   const hasher = await createSHA256()
+
   hasher.init()
   const total = file.size || 1
   let done = 0
@@ -15,6 +13,7 @@ export async function sha256HexOfFile(
 
   for (;;) {
     const { done: eof, value } = await reader.read()
+
     if (eof) break
     if (value) {
       hasher.update(value)
@@ -41,6 +40,7 @@ export function putWithProgress(
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+
     xhr.open('PUT', url)
     xhr.withCredentials = withCredentials
     if (contentType) {
@@ -59,11 +59,8 @@ export function putWithProgress(
         return
       }
       const detail = (xhr.responseText || '').trim().slice(0, 240)
-      reject(
-        new Error(
-          `Upload failed (HTTP ${xhr.status})${detail ? `: ${detail}` : ''}`
-        )
-      )
+
+      reject(new Error(`Upload failed (HTTP ${xhr.status})${detail ? `: ${detail}` : ''}`))
     }
 
     xhr.onerror = () => {
@@ -71,10 +68,7 @@ export function putWithProgress(
     }
 
     // Avoid browser auto Content-Type from Blob.type when none was requested.
-    const body =
-      contentType || !blob.type
-        ? blob
-        : blob.slice(0, blob.size, '')
+    const body = contentType || !blob.type ? blob : blob.slice(0, blob.size, '')
 
     xhr.send(body)
   })
@@ -87,5 +81,6 @@ export function resolveMonoUploadUrl(putUrlOrPath: string, monoApiBase: string):
   }
   const base = monoApiBase.replace(/\/$/, '')
   const path = putUrlOrPath.startsWith('/') ? putUrlOrPath : `/${putUrlOrPath}`
+
   return `${base}${path}`
 }

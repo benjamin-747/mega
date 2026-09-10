@@ -66,11 +66,13 @@ function mergeLogChunk(prev: string, chunk: string): string {
 
   for (const raw of incoming) {
     const line = raw
+
     if (line === '' && incoming.length === 1) {
       continue
     }
     if (isProvisionProgressLine(line)) {
       const lastIdx = lines.length - 1
+
       if (lastIdx >= 0 && isProvisionProgressLine(lines[lastIdx])) {
         lines[lastIdx] = line
       } else {
@@ -82,6 +84,7 @@ function mergeLogChunk(prev: string, chunk: string): string {
   }
 
   let next = lines.join('\n')
+
   if (chunk.endsWith('\n') && !next.endsWith('\n')) {
     next += '\n'
   }
@@ -139,6 +142,7 @@ export function useRunnerLogsSSE(streamKey: string | null) {
       // Real guest/system logs arrived — clear the transient-wait gate so a later
       // reprovision can announce waiting again if needed. Progress lines keep the gate.
       const trimmed = chunk.trim()
+
       if (
         !TRANSIENT_NO_VM_RE.test(trimmed) &&
         !isProvisionProgressLine(trimmed) &&

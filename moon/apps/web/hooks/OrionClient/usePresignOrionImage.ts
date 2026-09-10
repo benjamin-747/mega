@@ -34,6 +34,7 @@ export function usePresignOrionImage() {
       })
       const text = await res.text()
       let json: Envelope | null = null
+
       try {
         json = text ? (JSON.parse(text) as Envelope) : null
       } catch {
