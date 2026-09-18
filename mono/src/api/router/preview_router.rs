@@ -227,10 +227,16 @@ async fn get_tree_commit_info(
     Query(query): Query<CodePreviewQuery>,
     state: State<MonoApiServiceState>,
 ) -> Result<Json<CommonResult<Vec<TreeCommitItem>>>, ApiError> {
+    // Pass refs as None if empty, matching get_latest_commit / history traversal.
+    let refs_opt = if query.refs.is_empty() {
+        None
+    } else {
+        Some(query.refs.as_str())
+    };
     let data = state
         .api_handler(query.path.as_ref())
         .await?
-        .get_tree_commit_info(query.path.into(), Some(query.refs.as_str()))
+        .get_tree_commit_info(query.path.into(), refs_opt)
         .await?;
     Ok(Json(CommonResult::success(Some(data))))
 }

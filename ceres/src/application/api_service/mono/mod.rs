@@ -13,6 +13,7 @@ pub mod cl_list;
 pub mod cla;
 pub mod code_review;
 pub mod commit;
+pub mod commit_info_policy;
 pub mod conversation;
 pub mod dynamic_sidebar;
 pub mod edit;

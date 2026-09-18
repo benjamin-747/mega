@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use api_model::common::Pagination;
+use api_model::{common::Pagination, git::commit::LatestCommitInfo};
 use async_trait::async_trait;
 use common::errors::MegaError;
 use git_internal::{
@@ -21,14 +21,18 @@ use git_internal::{
 };
 use jupiter::{storage::Storage, utils::converter::FromMegaModel};
 
-use super::{context::ServiceContext, logic::MonoServiceLogic};
+use super::{commit_info_policy, context::ServiceContext, logic::MonoServiceLogic};
 use crate::{
     application::{
-        api_service::{ApiHandler, cache::GitObjectCache, tree_ops},
+        api_service::{
+            ApiHandler, cache::GitObjectCache, commit_ops, history,
+            import_api_service::ImportApiService, tree_ops,
+        },
         build_trigger::SharedBuildDispatch,
     },
     infra::TransportContext,
     model::git::{CreateEntryInfo, CreateEntryResult, EditFilePayload, EditFileResult},
+    transport::protocol::repo::Repo,
 };
 
 /// Git-domain API service (tags, commits, sync, buck upload, entry edit).
@@ -77,6 +81,124 @@ impl MonoApiService {
             )
             .await?;
         Ok(())
+    }
+
+    /// Default tree view (empty/`main`/`master`) can use denormalized stamps.
+    fn prefer_denormalized_commit_map(reference: Option<&str>) -> bool {
+        commit_info_policy::prefer_denormalized_for_refs(reference)
+    }
+
+    fn path_under_import_dir(&self, path: &Path) -> bool {
+        commit_info_policy::is_path_under_import_dir(path, &self.import_dir())
+    }
+
+    /// Prefer the import-repo handler for `/third-party/**` so commit-info shows
+    /// `Import …` commits, not monorepo `cl merge generated commit`.
+    async fn import_handler_for_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ImportApiService>, MegaError> {
+        if !self.path_under_import_dir(path) {
+            return Ok(None);
+        }
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| MegaError::Other(format!("invalid path: {}", path.display())))?;
+        let Some(model) = self.find_git_repo_like_path(path_str).await? else {
+            return Ok(None);
+        };
+        Ok(Some(ImportApiService::new(
+            self.storage().clone(),
+            Repo::from(model),
+            self.git_object_cache(),
+        )))
+    }
+
+    /// Returns `Ok(Some(map))` only when every tree item has a resolvable stamp.
+    /// `Ok(None)` means caller should fall back to history traversal.
+    async fn denormalized_item_to_commit_map(
+        &self,
+        path: &Path,
+        reference: Option<&str>,
+    ) -> Result<Option<HashMap<TreeItem, Option<Commit>>>, GitError> {
+        let Some(tree) = tree_ops::search_tree_by_path(self, path, reference)
+            .await
+            .map_err(|e| GitError::CustomError(e.to_string()))?
+        else {
+            return Ok(Some(HashMap::new()));
+        };
+
+        if tree.tree_items.is_empty() {
+            return Ok(Some(HashMap::new()));
+        }
+
+        let storage = self.storage().mono_storage();
+        let mut item_to_commit = HashMap::new();
+
+        let tree_hashes: Vec<String> = tree
+            .tree_items
+            .iter()
+            .filter(|x| x.mode == TreeItemMode::Tree)
+            .map(|x| x.id.to_string())
+            .collect();
+        if !tree_hashes.is_empty() {
+            let trees = storage
+                .get_trees_by_hashes(tree_hashes)
+                .await
+                .map_err(|e| GitError::CustomError(e.to_string()))?;
+            for t in trees {
+                if t.commit_id.is_empty() {
+                    return Ok(None);
+                }
+                item_to_commit.insert(t.tree_id, t.commit_id);
+            }
+        }
+
+        let blob_hashes: Vec<String> = tree
+            .tree_items
+            .iter()
+            .filter(|x| x.mode == TreeItemMode::Blob)
+            .map(|x| x.id.to_string())
+            .collect();
+        if !blob_hashes.is_empty() {
+            let blobs = storage
+                .get_mega_blobs_by_hashes(blob_hashes)
+                .await
+                .map_err(|e| GitError::CustomError(e.to_string()))?;
+            for blob in blobs {
+                if blob.commit_id.is_empty() {
+                    return Ok(None);
+                }
+                item_to_commit.insert(blob.blob_id, blob.commit_id);
+            }
+        }
+
+        // Every tree item must have a stamp (missing row or empty → history).
+        for item in &tree.tree_items {
+            if !item_to_commit.contains_key(&item.id.to_string()) {
+                return Ok(None);
+            }
+        }
+
+        let commit_ids: HashSet<String> = item_to_commit.values().cloned().collect();
+        let commits = self
+            .get_commits_by_hashes(commit_ids.into_iter().collect())
+            .await?;
+        let commit_map: HashMap<String, Commit> =
+            commits.into_iter().map(|x| (x.id.to_string(), x)).collect();
+
+        // If a stamp points at a missing commit, fall back to history.
+        for commit_id in item_to_commit.values() {
+            if !commit_map.contains_key(commit_id) {
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(MonoServiceLogic::map_tree_items_to_commits(
+            tree,
+            &item_to_commit,
+            &commit_map,
+        )))
     }
 }
 
@@ -162,58 +284,80 @@ impl ApiHandler for MonoApiService {
         Ok(Commit::from_mega_model(model))
     }
 
+    async fn get_latest_commit(
+        &self,
+        path: PathBuf,
+        refs: Option<&str>,
+    ) -> Result<LatestCommitInfo, GitError> {
+        // `/third-party/**` is direct import — never attribute monorepo CL merges.
+        if let Some(import) = self
+            .import_handler_for_path(&path)
+            .await
+            .map_err(|e| GitError::CustomError(e.to_string()))?
+        {
+            return commit_ops::get_latest_commit(&import, path, refs).await;
+        }
+        commit_ops::get_latest_commit(self, path, refs).await
+    }
+
     async fn item_to_commit_map(
         &self,
         path: PathBuf,
         reference: Option<&str>,
     ) -> Result<HashMap<TreeItem, Option<Commit>>, GitError> {
-        match tree_ops::search_tree_by_path(self, &path, reference).await? {
-            Some(tree) => {
-                let mut item_to_commit = HashMap::new();
+        let import_dir = self.import_dir();
+        let has_git_repo = if commit_info_policy::is_path_under_import_dir(&path, &import_dir) {
+            let path_str = path.to_str().ok_or_else(|| {
+                GitError::CustomError(format!("invalid path: {}", path.display()))
+            })?;
+            self.find_git_repo_like_path(path_str)
+                .await
+                .map_err(|e| GitError::CustomError(e.to_string()))?
+                .is_some()
+        } else {
+            false
+        };
+        let route = commit_info_policy::commit_info_route(&path, &import_dir, has_git_repo);
 
-                let storage = self.storage().mono_storage();
-                let tree_hashes = tree
-                    .tree_items
-                    .iter()
-                    .filter(|x| x.mode == TreeItemMode::Tree)
-                    .map(|x| x.id.to_string())
-                    .collect();
-                let trees = storage.get_trees_by_hashes(tree_hashes).await.unwrap();
-                for tree in trees {
-                    if !tree.commit_id.is_empty() {
-                        item_to_commit.insert(tree.tree_id, tree.commit_id);
-                    }
-                }
-
-                let blob_hashes = tree
-                    .tree_items
-                    .iter()
-                    .filter(|x| x.mode == TreeItemMode::Blob)
-                    .map(|x| x.id.to_string())
-                    .collect();
-                let blobs = storage.get_mega_blobs_by_hashes(blob_hashes).await.unwrap();
-                for blob in blobs {
-                    if !blob.commit_id.is_empty() {
-                        item_to_commit.insert(blob.blob_id, blob.commit_id);
-                    }
-                }
-
-                let commit_ids: HashSet<String> = item_to_commit.values().cloned().collect();
-                let commits = self
-                    .get_commits_by_hashes(commit_ids.into_iter().collect())
+        match route {
+            // Import repos are attached into the monorepo tree, but last-mod must
+            // come from the import commit DAG (`Import …`), not monorepo history
+            // (`cl merge generated commit`).
+            commit_info_policy::CommitInfoRoute::ImportRepo => {
+                let import = self
+                    .import_handler_for_path(&path)
                     .await
-                    .unwrap();
-
-                let commit_map: HashMap<String, Commit> =
-                    commits.into_iter().map(|x| (x.id.to_string(), x)).collect();
-
-                Ok(MonoServiceLogic::map_tree_items_to_commits(
-                    tree,
-                    &item_to_commit,
-                    &commit_map,
-                ))
+                    .map_err(|e| GitError::CustomError(e.to_string()))?
+                    .ok_or_else(|| {
+                        GitError::CustomError(
+                            "import repo expected for commit-info route".to_string(),
+                        )
+                    })?;
+                import.item_to_commit_map(path, reference).await
             }
-            None => Ok(HashMap::new()),
+            // Under import_dir without a registered git_repo: never walk monorepo
+            // history (would still blame CL merges). Prefer denormalized stamps only.
+            commit_info_policy::CommitInfoRoute::ImportDirDenormalizedOnly => Ok(self
+                .denormalized_item_to_commit_map(&path, reference)
+                .await?
+                .unwrap_or_default()),
+            // `/project/**` and other monorepo paths: denormalized when complete,
+            // otherwise history (fixes blank/stale stamps after CL merge reuse).
+            commit_info_policy::CommitInfoRoute::MonorepoDenormalizedOrHistory => {
+                if Self::prefer_denormalized_commit_map(reference)
+                    && let Some(map) = self
+                        .denormalized_item_to_commit_map(&path, reference)
+                        .await?
+                {
+                    return Ok(map);
+                }
+                // Policy gate: only this route may run monorepo history BFS.
+                assert!(
+                    commit_info_policy::allows_monorepo_history(route),
+                    "monorepo history must not run for import_dir paths"
+                );
+                history::item_to_commit_map(self, path, reference).await
+            }
         }
     }
 
